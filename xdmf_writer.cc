@@ -9,6 +9,11 @@
 #include <hdf5_hl.h>
 #include <cassert>
 
+#include <sys/stat.h> // For mkdir
+#include <sys/types.h> // For mkdir
+#include <cerrno>      // For errno
+#include <cstring>   // for strerror()
+
 XDMFWriter::XDMFWriter(const std::string& filename_prefix,
                        const std::size_t nx,
                        const std::size_t ny,
@@ -17,9 +22,18 @@ XDMFWriter::XDMFWriter(const std::string& filename_prefix,
                        const std::vector<double>& topography) :
   filename_prefix_(filename_prefix), nx_(nx), ny_(ny), size_x_(size_x), size_y_(size_y)
 {
-  this->write_mesh_hdf5();
-  this->write_topography_hdf5(topography);
-  this->write_root_xdmf();
+  // Create directory
+  // S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH gives rwxrwxr-x permissions
+  if (mkdir(filename_prefix_.c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH) != 0) {
+    if (errno != EEXIST) { // EEXIST means directory already exists, which is fine.
+      std::cerr << "Error creating directory " << filename_prefix_ << ": " << strerror(errno) << std::endl;
+      // You might want to throw an exception or exit if directory creation is critical and fails for other reasons.
+    }
+  }
+
+  this->write_mesh_hdf5(); // Will now write into the directory
+  this->write_topography_hdf5(topography); // Will now write into the directory
+  this->write_root_xdmf(); // The .xdmf file itself will also be in this directory
 }
 
 void
@@ -28,17 +42,20 @@ XDMFWriter::add_h(const std::vector<double>& h, const double t)
   assert(h.size() == nx_ * ny_);
   time_steps_.push_back(t);
 
-  this->write_root_xdmf();
+  // The root XDMF file is rewritten to include the new time step
+  this->write_root_xdmf(); // This will write the .xdmf file into the directory
 
-  const std::string filename = filename_prefix_ + "_h_" + std::to_string(time_steps_.size() - 1) + ".h5";
+  // Construct HDF5 filename within the directory
+  const std::string h5_filename = filename_prefix_ + "/" + filename_prefix_ + "_h_" + std::to_string(time_steps_.size() - 1) + ".h5";
 
-  write_array_to_hdf5(filename, "h", h);
+  write_array_to_hdf5(h5_filename, "h", h); // write_array_to_hdf5 takes the full path
 }
 
 void
 XDMFWriter::write_root_xdmf() const
 {
-  std::ofstream xdmf_file(filename_prefix_ + ".xdmf");
+  // XDMF file itself is inside the directory
+  std::ofstream xdmf_file(filename_prefix_ + "/" + filename_prefix_ + ".xdmf");
 
   const std::size_t n_vertices = (nx_ + 1) * (ny_ + 1);
   const std::size_t n_cells = nx_ * ny_;
@@ -51,12 +68,13 @@ XDMFWriter::write_root_xdmf() const
     xdmf_file << "  <Domain>\n";
     xdmf_file << "    <Grid Name=\"mesh\" GridType=\"Uniform\">\n";
     xdmf_file << "        <Topology TopologyType=\"Quadrilateral\" NumberOfElements=\"" << n_cells << "\">\n";
+    // Path inside XDMF: HDF5 file is in the same directory as the XDMF file
     xdmf_file << "          <DataItem DataType=\"Int\" Format=\"HDF\" Dimensions=\"" << n_cells << " 4\">"
-              << filename_prefix_ << "_mesh.h5:/cells</DataItem>\n";
+              << filename_prefix_ << "_mesh.h5:/cells</DataItem>\n"; // Filename relative to XDMF
     xdmf_file << "        </Topology>\n";
     xdmf_file << "        <Geometry GeometryType=\"XY\">\n";
     xdmf_file << "          <DataItem DataType=\"Float\" Precision=\"8\" Format=\"HDF\" Dimensions=\"" << n_vertices
-              << " 2\">" << filename_prefix_ << "_mesh.h5:/vertices</DataItem>\n";
+              << " 2\">" << filename_prefix_ << "_mesh.h5:/vertices</DataItem>\n"; // Filename relative to XDMF
     xdmf_file << "        </Geometry>\n";
     xdmf_file << "    </Grid>\n";
 
@@ -72,11 +90,13 @@ XDMFWriter::write_root_xdmf() const
         xdmf_file << "        <Time Value=\"" << time_steps_[i] << "\"/>\n";
 
         xdmf_file << "        <Attribute Name=\"h\" AttributeType=\"Scalar\" Center=\"Cell\">\n";
+        // Filename relative to XDMF
         xdmf_file << "          <DataItem DataType=\"Float\" Precision=\"8\" Format=\"HDF\" Dimensions=\"" << n_cells
                   << "\">" << filename_prefix_ << "_h_" << i << ".h5:/h</DataItem>\n";
         xdmf_file << "        </Attribute>\n";
 
         xdmf_file << "        <Attribute Name=\"topography\" AttributeType=\"Scalar\" Center=\"Cell\">\n";
+        // Filename relative to XDMF
         xdmf_file << "          <DataItem DataType=\"Float\" Precision=\"8\" Format=\"HDF\" Dimensions=\"" << n_cells
                   << "\">" << filename_prefix_ << "_topography.h5:/topography</DataItem>\n";
         xdmf_file << "        </Attribute>\n";
@@ -90,11 +110,10 @@ XDMFWriter::write_root_xdmf() const
     xdmf_file << "</Xdmf>\n";
 
     xdmf_file.close();
-    // std::cout << "XDMF file created: " << filename_prefix_ + ".xdmf" << std::endl;
   }
   else
   {
-    std::cerr << "Error creating XDMF file: " << filename_prefix_ + ".xdmf" << std::endl;
+    std::cerr << "Error creating XDMF file: " << filename_prefix_ + "/" + filename_prefix_ + ".xdmf" << std::endl;
   }
 }
 
@@ -136,7 +155,7 @@ void
 XDMFWriter::write_mesh_hdf5() const
 {
   // Create the HDF5 file
-  hid_t file_id = H5Fcreate((filename_prefix_ + "_mesh.h5").c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+  hid_t file_id = H5Fcreate((filename_prefix_ + "/" + filename_prefix_ + "_mesh.h5").c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
   if (file_id < 0)
   {
     std::cerr << "Error creating HDF5 file: " << filename_prefix_ + "_mesh.h5" << std::endl;
@@ -194,8 +213,9 @@ XDMFWriter::write_mesh_hdf5() const
 void
 XDMFWriter::write_topography_hdf5(const std::vector<double>& topography) const
 {
-  const std::string filename = filename_prefix_ + "_topography.h5";
-  write_array_to_hdf5(filename, "topography", topography);
+  // Construct HDF5 filename within the directory
+  const std::string h5_filename = filename_prefix_ + "/" + filename_prefix_ + "_topography.h5";
+  write_array_to_hdf5(h5_filename, "topography", topography);
 }
 
 void

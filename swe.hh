@@ -1,3 +1,4 @@
+#include <mpi.h>
 #include <cstddef>
 #include <vector>
 #include <string>
@@ -5,92 +6,66 @@
 class SWESolver
 {
 public:
-  /**
-   * @brief Constructor for the SWESolver class.
-   * @warning Not allowed to be used.
-   */
   SWESolver() = delete;
 
-  /// Gravity 9.82 * (3.6)^2 * 1000 in[km / hour^2]
   static constexpr double g = 127267.20000000;
+  // Define halo width (for 1-stencil methods like Lax-Friedrichs)
+  static const std::size_t halo_width_ = 1;
 
-  /**
-   * @brief Construtor.
-   * @param test_case_id It can be 1 (water drops in a box) or 2 (analytical tsunami).
-   * @param nx  Number of cells along the x direction.
-   * @param ny  Number of cells along the y direction.
-   */
-  SWESolver(const int test_case_id, const std::size_t nx, const std::size_t ny);
+  SWESolver(const int test_case_id,
+            std::size_t global_nx, std::size_t global_ny,
+            MPI_Comm cart_comm, int rank, int num_procs,
+            const int* dims, const int* coords, const int* neighbors);
 
-  /**
-   * @brief Constructor for the SWESolver class.
-   *
-   * This constructor corresponds to the case in which the initial conditions
-   * and topography are read from a HDF5 file.
-   *
-   * @param h5_file HDF5 file name containing the initial conditions and topography.
-   * @param size_x  Size in km along the x direction.
-   * @param size_y  Size in km along the y direction.
-   */
-  SWESolver(const std::string &h5_file, const double size_x, const double size_y);
+  SWESolver(const std::string &h5_file, const double size_x, const double size_y,
+            MPI_Comm cart_comm, int rank, int num_procs,
+            const int* dims, const int* coords, const int* neighbors);
 
-  /**
-   * @brief Solve the shallow water equations.
-   * @brief Tend Total simulation time.
-   * @brief full_log If true, the simulation will log the time step
-   * and the time step size at each time step. Otherwise, only
-   * the progress of the simulation will be logged.
-   * @brief output_n If different from 0, the simulation will write
-   * a solution each output_n time steps. E.g., if set to 10,
-   * a solution file will be written each 10 steps.
-   * @brief fname_prefix If @p output_n is different from 0, the generated
-   * files will use this file name prefix.
-   */
   void solve(const double Tend,
              const bool full_log = false,
              const std::size_t output_n = 0,
              const std::string &fname_prefix = "test");
 
+  static void write_local_h5_data(const std::string& filename,
+                                const std::string& dataset_name,
+                                const std::vector<double>& local_owned_data,
+                                std::size_t local_dim_nx, // Number of cells in x for this local data
+                                std::size_t local_dim_ny  // Number of cells in y for this local data
+                                );
+
 private:
-  /**
-   * @brief Initializes the initial conditions and topography using
-   * the provided HDF5 file.
-   *
-   * @param h5_file HDF5 file name containing the initial conditions and topography.
-   */
   void init_from_HDF5_file(const std::string &h5_file);
-
-  /**
-   * @brief Initializes the initial conditions and topography using
-   * a Gaussian function.
-   *
-   * The water height is initialized with two separated Gaussian peaks.
-   * The initial water velocity is set to zero and the topography is set to zero.
-   */
   void init_gaussian();
-
-  /**
-   * @brief Initializes the initial conditions and topography using
-   * a dummy tsunami function.
-   */
   void init_dummy_tsunami();
-
-  /**
-   * @brief Initializes the initial conditions and topography using
-   * a slope function.
-   */
-  void init_dummy_slope();
-
-  /**
-   * @brief Initializes the derivatives dx and dy from the topography.
-   */
+  void init_dummy_slope(); // This was unused, will remain so for now
   void init_dx_dy();
+  void exchange_halos_for_field(std::vector<double>& data_field);
+  void print_debug_perimeter_and_halos(const std::vector<double>& data_field, const std::string& label) const;
 
-  std::size_t nx_;
-  std::size_t ny_;
+  // MPI-related members
+  MPI_Comm cart_comm_;
+  int rank_;
+  int num_procs_;
+  int dims_[2];      // Dimensions of the process grid {px, py}
+  int coords_[2];    // Coordinates of this process in the grid {cx, cy}
+  int neighbors_[4]; // Ranks: [UP, DOWN, LEFT, RIGHT] (Indices: 0:UP, 1:DOWN, 2:LEFT, 3:RIGHT)
+
+  // Grid and domain properties
+  std::size_t global_nx_; // Global number of cells in x
+  std::size_t global_ny_; // Global number of cells in y
+  std::size_t nx_;        // Local number of OWNED cells in x
+  std::size_t ny_;        // Local number of OWNED cells in y
+
+  std::size_t nx_padded_; // Local dimensions INCLUDING halo cells (nx_ + 2*halo_width_)
+  std::size_t ny_padded_; // Local dimensions INCLUDING halo cells (ny_ + 2*halo_width_)
+
+  // Global physical size of domain
   double size_x_;
   double size_y_;
+
   bool reflective_;
+
+  // Data vectors will store local subgrid + halo regions
   std::vector<double> h0_;
   std::vector<double> h1_;
   std::vector<double> hu0_;
@@ -101,93 +76,59 @@ private:
   std::vector<double> zdx_;
   std::vector<double> zdy_;
 
-  /**
-   * @brief Accessor for 2D vector elements.
-   */
-  inline double &at(std::vector<double> &vec, const std::size_t i, const std::size_t j) const
-  {
-    return vec[j * nx_ + i];
-  }
+  // Global starting indices for this process's owned subgrid
+  std::size_t G_start_i_;
+  std::size_t G_start_j_;
+
 
   /**
-   * @brief Accessor for 2D vector elements.
-   * @note Constant vector version.
+   * @brief Accessor for 2D vector elements using PADDED indices.
+   * (padded_i, padded_j) are indices in the local array that includes halos.
+   * E.g., owned cell (0,0) is at (halo_width_, halo_width_) in padded array.
    */
-  inline const double &at(const std::vector<double> &vec, const std::size_t i, const std::size_t j) const
+  inline double &at(std::vector<double> &vec, const std::size_t padded_i, const std::size_t padded_j) const
   {
-    return vec[j * nx_ + i];
+    return vec[padded_j * nx_padded_ + padded_i];
   }
 
-  /**
-   * @brief Updates the water height and velocities using the SWE kernel at a given cell.
-   * @param i x index of the cell.
-   * @param j y index of the cell.
-   * @param dt Time step.
-   * @param h0 The water height in the previous time step.
-   * @param hu0 The x water velocity in the previous time step.
-   * @param hv0 The y water velocity in the previous time step.
-   * @param h The water height in the current time step.
-   * @param hu The x water velocity in the current time step.
-   * @param hv The y water velocity in the current time step.
-   */
-  void compute_kernel(const std::size_t i,
-                      const std::size_t j,
+  inline const double &at(const std::vector<double> &vec, const std::size_t padded_i, const std::size_t padded_j) const
+  {
+    return vec[padded_j * nx_padded_ + padded_i];
+  }
+
+  // Forward declarations for methods to be modified/implemented later
+  void exchange_halos_generic(std::vector<double>& data_field_0,
+                              std::vector<double>& data_field_1,
+                              std::vector<double>& data_field_2); // Example, might need separate for h, hu, hv
+  void exchange_halos_h();
+  void exchange_halos_hu();
+  void exchange_halos_hv();
+  void exchange_halos_z();
+
+
+  void compute_kernel(const std::size_t padded_i, // Kernel will operate using padded indices
+                      const std::size_t padded_j,
                       const double dt,
-                      const std::vector<double> &h0,
-                      const std::vector<double> &hu0,
-                      const std::vector<double> &hv0,
-                      std::vector<double> &h,
-                      std::vector<double> &hu,
-                      std::vector<double> &hv) const;
+                      const std::vector<double> &h0_local, // Pass local refs for clarity
+                      const std::vector<double> &hu0_local,
+                      const std::vector<double> &hv0_local,
+                      std::vector<double> &h_local,
+                      std::vector<double> &hu_local,
+                      std::vector<double> &hv_local) const;
 
-  /**
-   * @brief Computes the time step size that satisfied the CFL condition.
-   *
-   * @param h The water height in the current time step.
-   * @param hu The x water velocity in the current time step.
-   * @param hv The y water velocity in the current time step.
-   * @param T Current time.
-   * @param Tend Final time.
-   * @return Compute time step.
-   */
-  double compute_time_step(const std::vector<double> &h,
-                           const std::vector<double> &hu,
-                           const std::vector<double> &hv,
+  double compute_time_step(const std::vector<double> &h_local,
+                           const std::vector<double> &hu_local,
+                           const std::vector<double> &hv_local,
                            const double T,
                            const double Tend) const;
 
-  /**
-   * @brief Solve one step of the SWE.
-   * @param dt The time step size.
-   * @param h0 The water height in the previous time step.
-   * @param hu0 The x water velocity in the previous time step.
-   * @param hv0 The y water velocity in the previous time step.
-   * @param h The water height in the current time step.
-   * @param hu The x water velocity in the current time step.
-   * @param hv The y water velocity in the current time step.
-   */
   void solve_step(const double dt,
-                  const std::vector<double> &h0,
-                  const std::vector<double> &hu0,
-                  const std::vector<double> &hv0,
-                  std::vector<double> &h,
-                  std::vector<double> &hu,
-                  std::vector<double> &hv) const;
+                  std::vector<double> &h0_local, // Pass local refs
+                  std::vector<double> &hu0_local,
+                  std::vector<double> &hv0_local,
+                  std::vector<double> &h_local,
+                  std::vector<double> &hu_local,
+                  std::vector<double> &hv_local); // Removed const as h0, hu0, hv0 might be swapped or directly modified via BCs in future
 
-  /**
-   * @brief Update boundary conditions.
-   * @note This function updates the boundary conditions for the SWE solver.
-   * @param h0 The water height in the previous time step.
-   * @param hu0 The x water velocity in the previous time step.
-   * @param hv0 The y water velocity in the previous time step.
-   * @param h The water height in the current time step.
-   * @param hu The x water velocity in the current time step.
-   * @param hv The y water velocity in the current time step.
-   */
-  void update_bcs(const std::vector<double> &h0,
-                  const std::vector<double> &hu0,
-                  const std::vector<double> &hv0,
-                  std::vector<double> &h,
-                  std::vector<double> &hu,
-                  std::vector<double> &hv) const;
+  void update_bcs(std::vector<double> &h_target, std::vector<double> &hu_target, std::vector<double> &hv_target);
 };
