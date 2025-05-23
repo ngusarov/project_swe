@@ -1,5 +1,9 @@
+// swe.cc
+
+#include <mpi.h> // <--- MOVED TO TOP
+
 #include "swe.hh"
-#include "xdmf_writer.hh"
+#include "xdmf_writer.hh" // Now include XDMFWriter header
 
 #include <iostream>
 #include <cstddef>
@@ -65,6 +69,7 @@ read_2d_array_from_DF5(const std::string &filename,
     H5Sclose(dataspace_id);
     H5Dclose(dataset_id);
     H5Fclose(file_id);
+    data.clear();
     return;
   }
   nx = dims[0];
@@ -89,12 +94,260 @@ read_2d_array_from_DF5(const std::string &filename,
   H5Sclose(dataspace_id);
   H5Dclose(dataset_id);
   H5Fclose(file_id);
-
-  // std::cout << "Successfully read 2D array from HDF5 file: " << filename << ", dataset: " << dataset_name <<
-  // std::endl;
 }
 
 } // namespace
+
+// --- New Parallel HDF5 Write Functions ---
+
+SWESolver::~SWESolver() = default; // <--- ADD THIS LINE
+
+
+void SWESolver::write_field_to_hdf5_parallel(const std::string& full_h5_filepath,
+                                             const std::string& dataset_name,
+                                             const std::vector<double>& data_field_padded)
+{
+    // Create file access property list for MPI-IO
+    hid_t fapl_id = H5Pcreate(H5P_FILE_ACCESS);
+    H5Pset_fapl_mpio(fapl_id, cart_comm_, MPI_INFO_NULL);
+
+    // Create or open the HDF5 file collectively
+    // Use H5F_ACC_TRUNC for creating a new file (e.g., for each time step's 'h' data)
+    hid_t file_id = H5Fcreate(full_h5_filepath.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, fapl_id);
+    if (file_id < 0) {
+        std::cerr << "Rank " << rank_ << ": Error creating HDF5 file: " << full_h5_filepath << std::endl;
+        H5Pclose(fapl_id);
+        return;
+    }
+
+    // Define global dataset dimensions
+    // HDF5 stores row-major (y then x), so global_ny_ is the number of rows, global_nx_ is number of columns
+    hsize_t global_dims[1] = {global_ny_ * global_nx_}; // Flattened 1D representation for cell-centered data
+    hid_t filespace_id = H5Screate_simple(1, global_dims, NULL);
+
+    // Define memory dataspace for the local owned data
+    hsize_t local_dims[1] = {ny_ * nx_}; // Local owned dimensions (flattened)
+    hid_t memspace_id = H5Screate_simple(1, local_dims, NULL);
+
+    // Define hyperslab in the file dataspace for this process's owned region
+    // The offset needs to be calculated in the flattened 1D global array.
+    // G_start_j_ * global_nx_ + G_start_i_ gives the 1D index of the first owned cell.
+    hsize_t offset[1] = {G_start_j_ * global_nx_ + G_start_i_};
+    hsize_t count[1] = {ny_ * nx_}; // Number of elements to select
+
+    H5Sselect_hyperslab(filespace_id, H5S_SELECT_SET, offset, NULL, count, NULL);
+
+    // Create the dataset collectively
+    hid_t dataset_id = H5Dcreate2(file_id, dataset_name.c_str(), H5T_IEEE_F64LE, filespace_id,
+                                  H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    if (dataset_id < 0) {
+        std::cerr << "Rank " << rank_ << ": Error creating dataset: " << dataset_name << std::endl;
+        H5Sclose(memspace_id);
+        H5Sclose(filespace_id);
+        H5Fclose(file_id);
+        H5Pclose(fapl_id);
+        return;
+    }
+
+    // Create property list for collective I/O
+    hid_t xfer_plist_id = H5Pcreate(H5P_DATASET_XFER);
+    H5Pset_dxpl_mpio(xfer_plist_id, H5FD_MPIO_COLLECTIVE);
+
+    // Extract the owned data from the padded field into a contiguous buffer for writing
+    std::vector<double> local_owned_data(nx_ * ny_);
+    for (std::size_t j_local = 0; j_local < ny_; ++j_local) {
+        for (std::size_t i_local = 0; i_local < nx_; ++i_local) {
+            local_owned_data[j_local * nx_ + i_local] = at(data_field_padded, i_local + halo_width_, j_local + halo_width_);
+        }
+    }
+
+    // Write the data collectively
+    herr_t status = H5Dwrite(dataset_id, H5T_IEEE_F64LE, memspace_id, filespace_id, xfer_plist_id, local_owned_data.data());
+    if (status < 0) {
+        std::cerr << "Rank " << rank_ << ": Error writing data for dataset: " << dataset_name << std::endl;
+    }
+
+    // Close resources
+    H5Pclose(xfer_plist_id);
+    H5Dclose(dataset_id);
+    H5Sclose(memspace_id);
+    H5Sclose(filespace_id);
+    H5Fclose(file_id);
+    H5Pclose(fapl_id);
+
+    if (rank_ == 0) {
+        std::cout << "Successfully wrote HDF5 file: " << full_h5_filepath << ", dataset: " << dataset_name << std::endl;
+    }
+}
+
+void SWESolver::write_mesh_to_hdf5_parallel()
+{
+    const std::string h5_filename = filename_prefix_ + "/" + filename_prefix_ + "_mesh.h5";
+
+    // Create file access property list for MPI-IO
+    hid_t fapl_id = H5Pcreate(H5P_FILE_ACCESS);
+    H5Pset_fapl_mpio(fapl_id, cart_comm_, MPI_INFO_NULL);
+
+    // Create the HDF5 file collectively
+    hid_t file_id = H5Fcreate(h5_filename.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, fapl_id);
+    if (file_id < 0) {
+        std::cerr << "Rank " << rank_ << ": Error creating HDF5 mesh file: " << h5_filename << std::endl;
+        H5Pclose(fapl_id);
+        return;
+    }
+
+    // --- Vertices ---
+    // Each process generates its local portion of vertices.
+    // The global grid has (global_nx_ + 1) * (global_ny_ + 1) vertices.
+    // Each process is responsible for vertices from its G_start_i_ to G_start_i_ + nx_
+    // and G_start_j_ to G_start_j_ + ny_.
+    // The last process in a dimension also includes the final edge.
+
+    std::vector<double> local_vertices_data;
+
+    const double dx_global = size_x_ / global_nx_;
+    const double dy_global = size_y_ / global_ny_;
+
+    // Determine local vertex range (global indices)
+    std::size_t local_vert_start_i = G_start_i_;
+    std::size_t local_vert_end_i = G_start_i_ + nx_; // Inclusive, so nx_ + 1 vertices in x
+    std::size_t local_vert_start_j = G_start_j_;
+    std::size_t local_vert_end_j = G_start_j_ + ny_; // Inclusive, so ny_ + 1 vertices in y
+
+    // Adjust for the last row/column if this is the last process in a dimension
+    // This ensures that the rightmost and bottommost global vertices are written exactly once.
+    if (coords_[0] == dims_[0] - 1) local_vert_end_i = global_nx_;
+    if (coords_[1] == dims_[1] - 1) local_vert_end_j = global_ny_;
+
+    // Calculate local dimensions of the vertex array (number of vertices in x and y for this process)
+    std::size_t num_local_verts_x = local_vert_end_i - local_vert_start_i + 1;
+    std::size_t num_local_verts_y = local_vert_end_j - local_vert_start_j + 1;
+
+    local_vertices_data.reserve(num_local_verts_x * num_local_verts_y * 2);
+
+    for (std::size_t j_global_vert = local_vert_start_j; j_global_vert <= local_vert_end_j; ++j_global_vert)
+    {
+        for (std::size_t i_global_vert = local_vert_start_i; i_global_vert <= local_vert_end_i; ++i_global_vert)
+        {
+            local_vertices_data.push_back(i_global_vert * dx_global);
+            local_vertices_data.push_back(j_global_vert * dy_global);
+        }
+    }
+
+    // Global dimensions for vertices dataset: (global_ny+1) * (global_nx+1) by 2
+    // HDF5 stores row-major, so total_rows = (global_ny+1)*(global_nx+1), total_cols = 2
+    hsize_t global_vert_dims[2] = {(global_ny_ + 1) * (global_nx_ + 1), 2};
+    hid_t vert_filespace_id = H5Screate_simple(2, global_vert_dims, NULL);
+
+    // Local dimensions for vertices memory space: (num_local_verts_y * num_local_verts_x) by 2
+    hsize_t local_vert_dims[2] = {num_local_verts_y * num_local_verts_x, 2};
+    hid_t vert_memspace_id = H5Screate_simple(2, local_vert_dims, NULL);
+
+    // Hyperslab for vertices: needs to map local_vertices_data to global_vert_dims
+    // The offset for each process's vertices needs to be calculated in this flattened 1D index.
+    // First vertex in global array for this process: (global_j_vertex_start * (global_nx_ + 1) + global_i_vertex_start) * 2
+    hsize_t vert_offset[2] = {(local_vert_start_j * (global_nx_ + 1) + local_vert_start_i), 0};
+    hsize_t vert_count[2] = {num_local_verts_y * num_local_verts_x, 2}; // Number of elements to select
+
+    H5Sselect_hyperslab(vert_filespace_id, H5S_SELECT_SET, vert_offset, NULL, vert_count, NULL);
+
+    hid_t vert_dataset_id = H5Dcreate2(file_id, "/vertices", H5T_IEEE_F64LE, vert_filespace_id,
+                                       H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    if (vert_dataset_id < 0) {
+        std::cerr << "Rank " << rank_ << ": Error creating vertices dataset" << std::endl;
+        H5Sclose(vert_memspace_id); H5Sclose(vert_filespace_id); H5Fclose(file_id); H5Pclose(fapl_id);
+        return;
+    }
+
+    hid_t xfer_plist_id = H5Pcreate(H5P_DATASET_XFER);
+    H5Pset_dxpl_mpio(xfer_plist_id, H5FD_MPIO_COLLECTIVE);
+    herr_t status = H5Dwrite(vert_dataset_id, H5T_IEEE_F64LE, vert_memspace_id, vert_filespace_id,
+                             xfer_plist_id, local_vertices_data.data());
+    if (status < 0) {
+        std::cerr << "Rank " << rank_ << ": Error writing vertices data" << std::endl;
+    }
+    H5Pclose(xfer_plist_id);
+    H5Dclose(vert_dataset_id);
+    H5Sclose(vert_memspace_id);
+    H5Sclose(vert_filespace_id);
+
+
+    // --- Cells ---
+    // Each process generates its local portion of cells.
+    // Cells are (i,j) where i in [0,nx_-1], j in [0,ny_-1] local.
+    // Global cells are (G_start_i_ + i_local, G_start_j_ + j_local).
+    // Each cell is 4 vertex indices.
+    std::vector<int> local_cells_data;
+    local_cells_data.reserve(nx_ * ny_ * 4);
+
+    for (std::size_t j_local = 0; j_local < ny_; ++j_local)
+    {
+        for (std::size_t i_local = 0; i_local < nx_; ++i_local)
+        {
+            // Global indices of the bottom-left vertex of the current cell
+            std::size_t global_i_bl = G_start_i_ + i_local;
+            std::size_t global_j_bl = G_start_j_ + j_local;
+
+            // Calculate global 1D indices of the four vertices
+            // Vertex (i,j) is at 1D index j * (global_nx_ + 1) + i
+            local_cells_data.push_back(global_j_bl * (global_nx_ + 1) + global_i_bl);             // BL
+            local_cells_data.push_back(global_j_bl * (global_nx_ + 1) + global_i_bl + 1);         // BR
+            local_cells_data.push_back((global_j_bl + 1) * (global_nx_ + 1) + global_i_bl + 1);   // TR
+            local_cells_data.push_back((global_j_bl + 1) * (global_nx_ + 1) + global_i_bl);       // TL
+        }
+    }
+
+    // Global dimensions for cells dataset: (global_nx * global_ny) by 4
+    hsize_t global_cell_dims[2] = {global_nx_ * global_ny_, 4};
+    hid_t cell_filespace_id = H5Screate_simple(2, global_cell_dims, NULL);
+
+    // Local dimensions for cells memory space: (nx_ * ny_) by 4
+    hsize_t local_cell_dims[2] = {nx_ * ny_, 4};
+    hid_t cell_memspace_id = H5Screate_simple(2, local_cell_dims, NULL);
+
+    // Hyperslab for cells: needs to map local_cells_data to global_cell_dims
+    // First cell in global array for this process: (G_start_j_ * global_nx_ + G_start_i_)
+    hsize_t cell_offset[2] = {(G_start_j_ * global_nx_ + G_start_i_), 0};
+    hsize_t cell_count[2] = {nx_ * ny_, 4};
+
+    H5Sselect_hyperslab(cell_filespace_id, H5S_SELECT_SET, cell_offset, NULL, cell_count, NULL);
+
+    hid_t cell_dataset_id = H5Dcreate2(file_id, "/cells", H5T_STD_I32LE, cell_filespace_id,
+                                       H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    if (cell_dataset_id < 0) {
+        std::cerr << "Rank " << rank_ << ": Error creating cells dataset" << std::endl;
+        H5Sclose(cell_memspace_id); H5Sclose(cell_filespace_id); H5Fclose(file_id); H5Pclose(fapl_id);
+        return;
+    }
+
+    xfer_plist_id = H5Pcreate(H5P_DATASET_XFER);
+    H5Pset_dxpl_mpio(xfer_plist_id, H5FD_MPIO_COLLECTIVE);
+    status = H5Dwrite(cell_dataset_id, H5T_STD_I32LE, cell_memspace_id, cell_filespace_id,
+                      xfer_plist_id, local_cells_data.data());
+    if (status < 0) {
+        std::cerr << "Rank " << rank_ << ": Error writing cells data" << std::endl;
+    }
+    H5Pclose(xfer_plist_id);
+    H5Dclose(cell_dataset_id);
+    H5Sclose(cell_memspace_id);
+    H5Sclose(cell_filespace_id);
+
+
+    // Close the file and FAPL
+    H5Fclose(file_id);
+    H5Pclose(fapl_id);
+
+    if (rank_ == 0) {
+        std::cout << "Successfully wrote HDF5 mesh file: " << h5_filename << std::endl;
+    }
+}
+
+void SWESolver::write_topography_to_hdf5_parallel(const std::vector<double>& topography_padded)
+{
+    // Construct HDF5 filename within the directory
+    const std::string h5_filename = filename_prefix_ + "/" + filename_prefix_ + "_topography.h5";
+    write_field_to_hdf5_parallel(h5_filename, "/topography", topography_padded);
+}
 
 
 /////////////////////////////
@@ -351,7 +604,7 @@ void SWESolver::init_gaussian() {
     fflush(stdout);
   }
   // Optional: MPI_Barrier(cart_comm_);
-} 
+}
 //*/
 
 /*
@@ -471,7 +724,7 @@ void SWESolver::init_dx_dy() {
       double z_im1 = at(z_, pi - 1, pj);
       double z_jp1 = at(z_, pi, pj + 1);
       double z_jm1 = at(z_, pi, pj - 1);
-      
+
       at(zdx_, pi, pj) = 0.5 * (z_ip1 - z_im1) / dx_global;
       at(zdy_, pi, pj) = 0.5 * (z_jp1 - z_jm1) / dy_global;
     }
@@ -480,50 +733,41 @@ void SWESolver::init_dx_dy() {
 
 // --- solve(), compute_time_step(), compute_kernel(), solve_step(), update_bcs() ---
 
-void SWESolver::solve(const double Tend, const bool full_log, 
-                      const std::size_t output_n_param, 
-                      const std::string &fname_prefix_param) 
+void SWESolver::solve(const double Tend, const bool full_log,
+                      const std::size_t output_n_param,
+                      const std::string &fname_prefix_param)
 {
+    // Initialize filename_prefix_ member
+    filename_prefix_ = fname_prefix_param;
+
     if (rank_ == 0) {
         std::cout << "Starting SWE parallel simulation (Rank 0 output, with first-step debug prints)..." << std::endl;
         std::cout << "Global Grid: " << global_nx_ << "x" << global_ny_
                   << ", Processes: " << num_procs_ << " (" << dims_[0] << "x" << dims_[1] << ")" << std::endl;
-        std::cout << "Rank 0 local owned grid: " << nx_ << "x" << ny_ << std::endl;
+        printf("Rank 0 local owned grid: %lux%lu\n", nx_, ny_);
         if (output_n_param > 0) {
-            std::cout << "Outputting Rank 0's local data every " << output_n_param 
-                      << " steps. Output dir/prefix: " << fname_prefix_param << std::endl;
+            std::cout << "Outputting data every " << output_n_param
+                      << " steps. Output dir/prefix: " << filename_prefix_ << std::endl;
         }
     }
 
-    std::unique_ptr<XDMFWriter> writer_ptr;
-
-    if (rank_ == 0 && output_n_param > 0) {
-        std::vector<double> z_owned_for_writer;
-        z_owned_for_writer.reserve(nx_ * ny_);
-        for(std::size_t j_local = 0; j_local < ny_; ++j_local) {
-            for(std::size_t i_local = 0; i_local < nx_; ++i_local) {
-                z_owned_for_writer.push_back(at(z_, i_local + halo_width_, j_local + halo_width_));
-            }
-        }
-        double r0_physical_size_x = (size_x_ / global_nx_) * nx_;
-        double r0_physical_size_y = (size_y_ / global_ny_) * ny_;
-        writer_ptr.reset(new XDMFWriter(fname_prefix_param, this->nx_, this->ny_,
-                                        r0_physical_size_x, r0_physical_size_y, z_owned_for_writer));
-        
-        std::vector<double> h0_owned_for_writer;
-        h0_owned_for_writer.reserve(nx_ * ny_);
-         for(std::size_t j_local = 0; j_local < ny_; ++j_local) {
-            for(std::size_t i_local = 0; i_local < nx_; ++i_local) {
-                h0_owned_for_writer.push_back(at(h0_, i_local + halo_width_, j_local + halo_width_));
-            }
-        }
-        if(writer_ptr) writer_ptr->add_h(h0_owned_for_writer, 0.0);
+    // All ranks create the XDMFWriter (it handles directory creation on rank 0)
+    // The XDMFWriter needs global dimensions
+    if (output_n_param > 0) {
+        writer_ptr_.reset(new XDMFWriter(filename_prefix_, global_nx_, global_ny_, size_x_, size_y_));
     }
+
+    // Write initial mesh and topography HDF5 files collectively
+    if (output_n_param > 0) {
+        write_mesh_to_hdf5_parallel();
+        write_topography_to_hdf5_parallel(z_); // Pass the padded z_ field
+    }
+    MPI_Barrier(cart_comm_); // Ensure mesh and topography are written before first h output
 
     double T = 0.0;
     std::size_t nt_step = 0;
     const int DEBUG_PRINT_RANK_LIMIT = 4; // Print debug for ranks < this
-    const bool FIRST_STEP_DEBUG_PRINTS = true; 
+    const bool FIRST_STEP_DEBUG_PRINTS = true;
     const int MAX_COMPUTE_STEPS_FOR_DEBUG = 1; // Limit computation for this specific debug
 
     // --- Debug prints for nt_step == 0 (Initial state and first boundary/halo processing) ---
@@ -534,7 +778,7 @@ void SWESolver::solve(const double Tend, const bool full_log,
         MPI_Barrier(cart_comm_);
 
         if (rank_ == 0) printf("\n--- [Step 0] Applying initial Physical BCs to h0_, hu0_, hv0_ ---\n");
-        update_bcs(h0_, hu0_, hv0_); 
+        update_bcs(h0_, hu0_, hv0_);
         if (rank_ < DEBUG_PRINT_RANK_LIMIT) {
             print_debug_perimeter_and_halos(h0_, "h0 - After 1st update_bcs");
         }
@@ -558,11 +802,21 @@ void SWESolver::solve(const double Tend, const bool full_log,
         exchange_halos_for_field(hv0_);
     }
 
+    // Initial output for h0
+    if (output_n_param > 0) {
+        // Construct HDF5 filename for initial h0
+        const std::string h_h5_filename = filename_prefix_ + "/" + filename_prefix_ + "_h_" + std::to_string(0) + ".h5";
+        write_field_to_hdf5_parallel(h_h5_filename, "/h", h0_);
+        if (rank_ == 0 && writer_ptr_) { // Only rank 0 updates the XDMF file
+            writer_ptr_->add_h_timestep(0.0); // Add 0.0 time step to XDMF
+        }
+    }
+    MPI_Barrier(cart_comm_); // Ensure initial h0 is written before loop starts
 
     // --- Main Time Loop ---
     while (T < Tend) {
         // For steps *after* the initial setup (nt_step > 0), halos of h0_ need updates
-        if (nt_step > 0) { 
+        if (nt_step > 0) {
             update_bcs(h0_, hu0_, hv0_);
             exchange_halos_for_field(h0_);
             exchange_halos_for_field(hu0_);
@@ -581,24 +835,26 @@ void SWESolver::solve(const double Tend, const bool full_log,
             fflush(stdout);
         }
 
-        this->solve_step(dt, h0_, hu0_, hv0_, h1_, hu1_, hv1_); 
+        this->solve_step(dt, h0_, hu0_, hv0_, h1_, hu1_, hv1_);
 
-        if (output_n_param > 0 && rank_ == 0 && (((nt_step + 1) % output_n_param == 0) || (T1 >= Tend && (nt_step +1)%output_n_param !=0 && T < Tend ) )) {
-            if (writer_ptr) {
-                std::vector<double> h_next_owned_for_writer;
-                h_next_owned_for_writer.reserve(nx_ * ny_);
-                for(std::size_t j_local = 0; j_local < ny_; ++j_local) {
-                    for(std::size_t i_local = 0; i_local < nx_; ++i_local) {
-                        h_next_owned_for_writer.push_back(at(h1_, i_local + halo_width_, j_local + halo_width_));
-                    }
-                }
-                writer_ptr->add_h(h_next_owned_for_writer, T1);
+        // Check if output is due for the *next* time step (h1_)
+        // The condition (nt_step + 1) % output_n_param == 0 means output every 'output_n_param' steps.
+        // The second part (T1 >= Tend ...) ensures the final step is always outputted if output_n_param > 0.
+        if (output_n_param > 0 && (((nt_step + 1) % output_n_param == 0) || (T1 >= Tend && (nt_step +1)%output_n_param !=0 && T < Tend ) )) {
+            // All ranks write their portion of h1_ to a new HDF5 file
+            // The index for the HDF5 file is based on the number of time steps already recorded in XDMF.
+            const std::string h_h5_filename = filename_prefix_ + "/" + filename_prefix_ + "_h_" + std::to_string(writer_ptr_->time_steps_.size()) + ".h5";
+            write_field_to_hdf5_parallel(h_h5_filename, "/h", h1_);
+            MPI_Barrier(cart_comm_); // Ensure HDF5 write is complete before rank 0 updates XDMF
+
+            if (rank_ == 0 && writer_ptr_) {
+                writer_ptr_->add_h_timestep(T1); // Only rank 0 updates the XDMF file
             }
         }
 
         std::swap(h0_, h1_); std::swap(hu0_, hu1_); std::swap(hv0_, hv1_);
         T = T1;
-        nt_step++; 
+        nt_step++;
         if (T >= Tend) break;
 
         // // For focused debugging of first step computation
@@ -606,9 +862,9 @@ void SWESolver::solve(const double Tend, const bool full_log,
         //     if(rank_==0) printf("Stopping after %d compute step(s) for debug.\n", MAX_COMPUTE_STEPS_FOR_DEBUG);
         //     break;
         // }
-    } 
+    }
 
-    if (rank_ == 0) { 
+    if (rank_ == 0) {
         if (T < Tend && !(full_log || (nt_step > 0 && (nt_step-1) % 10 == 0))) { printf("\n"); }
         else if (T>= Tend && !(full_log || (nt_step > 0 && (nt_step-1)%10==0) ) ){
              printf("Step %zu: T = %.6f hr (dt = --- s), Progress: 100.00%%\n", nt_step > 0 ? nt_step-1:0, T);
@@ -638,7 +894,7 @@ double SWESolver::compute_time_step(const std::vector<double> &h_local, // h0_
 
       const double hu_val = at(hu_local, pi, pj);
       const double hv_val = at(hv_local, pi, pj);
-      
+
       // Velocities u and v
       const double u_val = hu_val / h_val;
       const double v_val = hv_val / h_val;
@@ -887,97 +1143,6 @@ void SWESolver::exchange_halos_for_field(std::vector<double>& data_field) {
         }
     }
 }
-
-// Add this new private member function implementation within SWESolver in swe.cc
-
-/*
-void SWESolver::print_debug_perimeter_and_halos(const std::vector<double>& data_field, const std::string& label) const {
-    // Only print if local dimensions are valid (at least 1 owned cell)
-    if (nx_ == 0 || ny_ == 0) {
-        printf("[Rank %d (%d,%d)] %s: No owned cells to print perimeter for (nx_=%zu, ny_=%zu).\n",
-               rank_, coords_[0], coords_[1], label.c_str(), nx_, ny_);
-        fflush(stdout);
-        return;
-    }
-
-    printf("[Rank %d (%d,%d)] %s:\n", rank_, coords_[0], coords_[1], label.c_str());
-
-    // Define indices for printing: first, middle, last relevant points in a row/column
-    std::vector<std::size_t> i_print_indices, j_print_indices;
-    // For rows (across x-dimension: padded indices from 0 to nx_padded_-1)
-    i_print_indices.push_back(halo_width_ -1); // Left halo
-    i_print_indices.push_back(halo_width_);    // Leftmost owned
-    if (nx_ > 1) i_print_indices.push_back(halo_width_ + nx_ / 2); // Middle owned (approx)
-    if (nx_ > 0) i_print_indices.push_back(halo_width_ + nx_ - 1); // Rightmost owned
-    i_print_indices.push_back(halo_width_ + nx_);   // Right halo
-
-    // For columns (across y-dimension: padded indices from 0 to ny_padded_-1)
-    j_print_indices.push_back(halo_width_ -1); // Top halo
-    j_print_indices.push_back(halo_width_);    // Topmost owned
-    if (ny_ > 1) j_print_indices.push_back(halo_width_ + ny_ / 2); // Middle owned (approx)
-    if (ny_ > 0) j_print_indices.push_back(halo_width_ + ny_ - 1); // Bottommost owned
-    j_print_indices.push_back(halo_width_ + ny_);   // Bottom halo
-
-    // Helper to remove duplicates and sort, then filter for valid padded indices
-    auto sanitize_indices = [&](std::vector<std::size_t>& indices, std::size_t max_padded_dim) {
-        std::sort(indices.begin(), indices.end());
-        indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
-        std::vector<std::size_t> valid_indices;
-        for (std::size_t idx : indices) {
-            if (idx < max_padded_dim) { // Ensure index is within padded bounds
-                valid_indices.push_back(idx);
-            }
-        }
-        // If only one owned cell, halo_width_ - 1 might be < 0 if halo_width_ is 0 (not our case)
-        // or halo_width_ + nx_ (or ny_) might be same as halo_width_ + nx_ - 1 + 1
-        return valid_indices;
-    };
-
-    std::vector<std::size_t> valid_i_indices = sanitize_indices(i_print_indices, nx_padded_);
-    std::vector<std::size_t> valid_j_indices = sanitize_indices(j_print_indices, ny_padded_);
-
-
-    // Print Top Halo Row & Top Owned Row
-    if (halo_width_ > 0) { // If there is a top halo
-        printf("  Top Halo (pj=%2zu): ", halo_width_ - 1);
-        for (std::size_t pi : valid_i_indices) { printf("%8.1f ", at(data_field, pi, halo_width_ - 1)); }
-        printf("\n");
-    }
-    printf("  Top Own. (pj=%2zu): ", halo_width_);
-    for (std::size_t pi : valid_i_indices) { printf("%8.1f ", at(data_field, pi, halo_width_)); }
-    printf("\n");
-
-    // Print ... for middle rows if ny_ > 2 (more than just top and bottom owned)
-    if (ny_ > 2) {
-         printf("  ... (middle owned rows) ...\n");
-    }
-    
-    // Print Bottom Owned Row & Bottom Halo Row (only if ny_ > 1 for bottom owned, or always for bottom halo if ny_ >=0)
-    if (ny_ > 0) { // Ensure there's at least one owned row to have a "bottom owned"
-        printf("  Bot. Own. (pj=%2zu): ", ny_ - 1 + halo_width_);
-        for (std::size_t pi : valid_i_indices) { printf("%8.1f ", at(data_field, pi, ny_ - 1 + halo_width_)); }
-        printf("\n");
-    }
-    if (halo_width_ > 0) { // If there is a bottom halo
-        printf("  Bot. Halo (pj=%2zu): ", ny_ + halo_width_);
-        for (std::size_t pi : valid_i_indices) { printf("%8.1f ", at(data_field, pi, ny_ + halo_width_)); }
-        printf("\n");
-    }
-    printf("  -----\n");
-
-    // // Print Left Halo Col & Left Owned Col & Right Owned Col & Right Halo Col
-    // printf("  Padded i_idx:     "); for(std::size_t pi : valid_i_indices) { printf("%8zu ", pi); } printf("\n");
-    // printf("  LHalo (pi=%2zu):   ", halo_width_ -1); for(std::size_t pj : valid_j_indices) { printf("%8.1f ", at(data_field, halo_width_ -1, pj));} printf("\n");
-    // printf("  LOwn  (pi=%2zu):   ", halo_width_   ); for(std::size_t pj : valid_j_indices) { printf("%8.1f ", at(data_field, halo_width_   , pj));} printf("\n");
-    // if (nx_ > 2) printf("  ... (mid owned cols) ...\n");
-    // if (nx_ > 0) {
-    // printf("  ROwn  (pi=%2zu):   ", nx_-1+halo_width_);for(std::size_t pj : valid_j_indices) { printf("%8.1f ", at(data_field, nx_-1+halo_width_, pj));} printf("\n");
-    // }
-    // printf("  RHalo (pi=%2zu):   ", nx_  +halo_width_);for(std::size_t pj : valid_j_indices) { printf("%8.1f ", at(data_field, nx_  +halo_width_, pj));} printf("\n");
-
-    fflush(stdout);
-} */
-
 
 void SWESolver::print_debug_perimeter_and_halos(const std::vector<double>& data_field, const std::string& label) const {
     // Only print if local dimensions are valid for halo + some owned cells

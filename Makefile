@@ -1,3 +1,5 @@
+# Makefile
+
 # New MPICXX
 MPICXX=mpicxx # Or mpiCC, or your system's MPI C++ compiler wrapper
 CXX=${MPICXX} # Use MPICXX as the C++ compiler
@@ -15,7 +17,7 @@ CXXFLAGS += ${CXXFLAGS_COMMON} -I${HDF5_ROOT}/include
 # Linker flags - ensure HDF5 libs are linked after MPI has a chance to link its own.
 # $(CXXFLAGS_COMMON) might not be needed in LDFLAGS if it contains only compiler options.
 # Typically LDFLAGS includes library paths and library names.
-LDFLAGS_LIBS = -L${HDF5_ROOT}/lib -lhdf5 -lm
+LDFLAGS_LIBS = -L${HDF5_ROOT}/lib -lhdf5 -lhdf5_hl -lm
 
 
 OBJS= main.o swe.o xdmf_writer.o
@@ -23,23 +25,22 @@ OBJS= main.o swe.o xdmf_writer.o
 all: swe
 
 swe: $(OBJS)
-# Use $(LD) which is now $(MPICXX). Add common flags if they contain linker directives,
-# otherwise, just library paths and names.
-	$(LD) -o $@ $(OBJS) $(LDFLAGS_LIBS) $(CXXFLAGS_COMMON) # $(CXXFLAGS_COMMON) here for -g, -O3 etc. during link
+	$(LD) -o $@ $(OBJS) $(LDFLAGS_LIBS) $(CXXFLAGS_COMMON) # <--- This line MUST start with a TAB
 
 # Rule for .cc to .o
-%.o: %.cc %.hh swe.hh # Add swe.hh as a common dependency for .o files if it's widely included
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+# Add xdmf_writer.hh as a dependency for swe.o
+%.o: %.cc %.hh
+	$(CXX) $(CXXFLAGS) -c $< -o $@ # <--- This line MUST start with a TAB
 
-# For main.o, if it doesn't include xdmf_writer.hh directly
+# Explicit rules for clarity, ensuring correct dependencies
 main.o: main.cc swe.hh
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -c $< -o $@ # <--- This line MUST start with a TAB
 
-swe.o: swe.cc swe.hh
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+swe.o: swe.cc swe.hh xdmf_writer.hh # IMPORTANT: Dependency added for xdmf_writer.hh
+	$(CXX) $(CXXFLAGS) -c $< -o $@ # <--- This line MUST start with a TAB
 
 xdmf_writer.o: xdmf_writer.cc xdmf_writer.hh
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -c $< -o $@ # <--- This line MUST start with a TAB
 
 clean:
-	rm -f swe *.o *~
+	rm -f swe *.o *~ # <--- This line MUST start with a TAB

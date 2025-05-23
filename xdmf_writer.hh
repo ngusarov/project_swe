@@ -1,9 +1,14 @@
+// xdmf_writer.hh
+#pragma once // Use pragma once for header guards
 
 #include <vector>
 #include <string>
+#include <cstddef> // For std::size_t
 
 /**
- * @brief This class is used to write the mesh and the solution of the SWE to an XDMF file that read HDF5 files.
+ * @brief This class is used to write the XDMF file that references HDF5 files.
+ * It is now designed to work with parallel HDF5 outputs where a single HDF5
+ * file contains the global data.
  */
 class XDMFWriter
 {
@@ -11,29 +16,33 @@ public:
   /**
    * @brief Constructor for the XDMFWriter class.
    * @param filename_prefix The prefix of the filename to write.
-   * @param nx The number of cells in the x direction.
-   * @param ny The number of cells in the y direction.
-   * @param size_x The size of the domain in the x direction.
-   * @param size_y The size of the domain in the y direction.
-   * @param topography Topography field (one value per point).
+   * @param global_nx The global number of cells in the x direction.
+   * @param global_ny The global number of cells in the y direction.
+   * @param size_x The total physical size of the domain in the x direction.
+   * @param size_y The total physical size of the domain in the y direction.
    */
   XDMFWriter(const std::string& filename_prefix,
-             const std::size_t nx,
-             const std::size_t ny,
-             const std::size_t size_x,
-             const std::size_t size_y,
-             const std::vector<double>& topography);
+             const std::size_t global_nx,
+             const std::size_t global_ny,
+             const double size_x,
+             const double size_y);
 
   /**
    * @brief Adds a new solution step to the XDMF file.
    *
-   * It updates the XDMF file to include the new solution step and
-   * writes the solution to an HDF5 file.
+   * It updates the XDMF file to include the new solution step.
+   * The actual HDF5 data writing is handled externally (e.g., by SWESolver).
    *
-   * @brief h The water height solution to write.
-   * @brief t The solution's instant.
+   * @param t The solution's instant.
    */
-  void add_h(const std::vector<double>& h, const double t);
+  void add_h_timestep(const double t);
+
+  // Public access to time_steps_ for SWESolver to know the next HDF5 file index
+  // This is a pragmatic choice to avoid passing the index explicitly.
+  // A cleaner design might involve the XDMFWriter returning the index or
+  // SWESolver managing the index and passing it to add_h_timestep.
+  // For this refactor, direct access is simpler.
+  std::vector<double> time_steps_;
 
 private:
   /**
@@ -45,49 +54,15 @@ private:
    */
   void write_root_xdmf() const;
 
-  /**
-   * @brief Write the topography to an HDF5 file.
-   * @param topography The topography field to write.
-   */
-  void write_topography_hdf5(const std::vector<double>& topography) const;
-
-  /**
-   * @brief Create the vertices of the mesh.
-   * @param vertices The vector to store the vertices.
-   */
-  void create_vertices(std::vector<double>& vertices) const;
-
-  /**
-   * @brief Create the cells of the mesh.
-   * @param cells The vector to store the cells.
-   */
-  void create_cells(std::vector<int>& cells) const;
-
-  /**
-   * @brief Write the mesh (vertices + cells) to an HDF5 file.
-   */
-  void write_mesh_hdf5() const;
-
-  /**
-   * @brief Write a 1D array to an HDF5 file.
-   * @param filename The name of the HDF5 file.
-   * @param dataset_name The name of the dataset to write.
-   * @param data The data to write.
-   */
-  static void write_array_to_hdf5(const std::string& filename,
-                                  const std::string& dataset_name,
-                                  const std::vector<double>& data);
-
   /// @brief The prefix of the filename to write.
   const std::string filename_prefix_;
-  /// @brief The number of cells in the x direction.
-  const std::size_t nx_;
-  /// @brief The number of cells in the y direction.
-  const std::size_t ny_;
-  /// @brief The size of the domain in the x direction.
-  const std::size_t size_x_;
-  /// @brief The size of the domain in the y direction.
-  const std::size_t size_y_;
-  /// @brief The time steps of the solution.
-  std::vector<double> time_steps_;
+  /// @brief The global number of cells in the x direction.
+  const std::size_t global_nx_;
+  /// @brief The global number of cells in the y direction.
+  const std::size_t global_ny_;
+  /// @brief The total physical size of the domain in the x direction.
+  const double size_x_;
+  /// @brief The total physical size of the domain in the y direction.
+  const double size_y_;
 };
+

@@ -1,12 +1,25 @@
+// swe.hh
+#pragma once
+
 #include <mpi.h>
-#include <cstddef>
+
 #include <vector>
 #include <string>
+#include <cstddef> // For std::size_t
+#include <memory> // For std::unique_ptr
+
+// HDF5 includes for parallel I/O
+#include <hdf5.h>
+#include <hdf5_hl.h>
+
+// Forward declaration of XDMFWriter
+class XDMFWriter;
 
 class SWESolver
 {
 public:
   SWESolver() = delete;
+  ~SWESolver(); // Explicit destructor declaration
 
   static constexpr double g = 127267.20000000;
   // Define halo width (for 1-stencil methods like Lax-Friedrichs)
@@ -26,21 +39,22 @@ public:
              const std::size_t output_n = 0,
              const std::string &fname_prefix = "test");
 
-  static void write_local_h5_data(const std::string& filename,
-                                const std::string& dataset_name,
-                                const std::vector<double>& local_owned_data,
-                                std::size_t local_dim_nx, // Number of cells in x for this local data
-                                std::size_t local_dim_ny  // Number of cells in y for this local data
-                                );
-
 private:
   void init_from_HDF5_file(const std::string &h5_file);
   void init_gaussian();
   void init_dummy_tsunami();
-  void init_dummy_slope(); // This was unused, will remain so for now
   void init_dx_dy();
+  void update_bcs(std::vector<double>& h, std::vector<double>& hu, std::vector<double>& hv);
   void exchange_halos_for_field(std::vector<double>& data_field);
   void print_debug_perimeter_and_halos(const std::vector<double>& data_field, const std::string& label) const;
+
+  // New methods for parallel HDF5 writing
+  void write_field_to_hdf5_parallel(const std::string& full_h5_filepath,
+                                    const std::string& dataset_name,
+                                    const std::vector<double>& data_field_padded);
+  void write_mesh_to_hdf5_parallel();
+  void write_topography_to_hdf5_parallel(const std::vector<double>& topography_padded);
+
 
   // MPI-related members
   MPI_Comm cart_comm_;
@@ -80,6 +94,10 @@ private:
   std::size_t G_start_i_;
   std::size_t G_start_j_;
 
+  // Output related members
+  std::string filename_prefix_;
+  std::unique_ptr<XDMFWriter> writer_ptr_;
+
 
   /**
    * @brief Accessor for 2D vector elements using PADDED indices.
@@ -95,16 +113,6 @@ private:
   {
     return vec[padded_j * nx_padded_ + padded_i];
   }
-
-  // Forward declarations for methods to be modified/implemented later
-  void exchange_halos_generic(std::vector<double>& data_field_0,
-                              std::vector<double>& data_field_1,
-                              std::vector<double>& data_field_2); // Example, might need separate for h, hu, hv
-  void exchange_halos_h();
-  void exchange_halos_hu();
-  void exchange_halos_hv();
-  void exchange_halos_z();
-
 
   void compute_kernel(const std::size_t padded_i, // Kernel will operate using padded indices
                       const std::size_t padded_j,
@@ -128,7 +136,5 @@ private:
                   std::vector<double> &hv0_local,
                   std::vector<double> &h_local,
                   std::vector<double> &hu_local,
-                  std::vector<double> &hv_local); // Removed const as h0, hu0, hv0 might be swapped or directly modified via BCs in future
-
-  void update_bcs(std::vector<double> &h_target, std::vector<double> &hu_target, std::vector<double> &hv_target);
+                  std::vector<double> &hv_local);
 };
