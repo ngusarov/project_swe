@@ -1,12 +1,14 @@
 // swe.hh
 #pragma once
 
+#define H5_HAVE_PARALLEL_H5
+
 #include <mpi.h>
 
 #include <vector>
 #include <string>
-#include <cstddef> // For std::size_t
-#include <memory> // For std::unique_ptr
+#include <cstddef>
+#include <memory>
 
 // HDF5 includes for parallel I/O
 #include <hdf5.h>
@@ -19,10 +21,9 @@ class SWESolver
 {
 public:
   SWESolver() = delete;
-  ~SWESolver(); // Explicit destructor declaration
+  ~SWESolver();
 
   static constexpr double g = 127267.20000000;
-  // Define halo width (for 1-stencil methods like Lax-Friedrichs)
   static const std::size_t halo_width_ = 1;
 
   SWESolver(const int test_case_id,
@@ -36,7 +37,7 @@ public:
 
   void solve(const double Tend,
              const bool full_log = false,
-             const std::size_t output_n = 0,
+             const std::size_t output_n_param = 0,
              const std::string &fname_prefix = "test");
 
 private:
@@ -44,15 +45,12 @@ private:
   void init_gaussian();
   void init_dummy_tsunami();
   void init_dx_dy();
-  void update_bcs(std::vector<double>& h, std::vector<double>& hu, std::vector<double>& hv);
   void exchange_halos_for_field(std::vector<double>& data_field);
   void print_debug_perimeter_and_halos(const std::vector<double>& data_field, const std::string& label) const;
 
-  // New methods for parallel HDF5 writing
   void write_field_to_hdf5_parallel(const std::string& full_h5_filepath,
                                     const std::string& dataset_name,
                                     const std::vector<double>& data_field_padded);
-  void write_mesh_to_hdf5_parallel();
   void write_topography_to_hdf5_parallel(const std::vector<double>& topography_padded);
 
 
@@ -60,26 +58,25 @@ private:
   MPI_Comm cart_comm_;
   int rank_;
   int num_procs_;
-  int dims_[2];      // Dimensions of the process grid {px, py}
-  int coords_[2];    // Coordinates of this process in the grid {cx, cy}
-  int neighbors_[4]; // Ranks: [UP, DOWN, LEFT, RIGHT] (Indices: 0:UP, 1:DOWN, 2:LEFT, 3:RIGHT)
+  int dims_[2];
+  int coords_[2];
+  int neighbors_[4];
 
   // Grid and domain properties
-  std::size_t global_nx_; // Global number of cells in x
-  std::size_t global_ny_; // Global number of cells in y
-  std::size_t nx_;        // Local number of OWNED cells in x
-  std::size_t ny_;        // Local number of OWNED cells in y
+  std::size_t global_nx_;
+  std::size_t global_ny_;
+  std::size_t nx_;
+  std::size_t ny_;
 
-  std::size_t nx_padded_; // Local dimensions INCLUDING halo cells (nx_ + 2*halo_width_)
-  std::size_t ny_padded_; // Local dimensions INCLUDING halo cells (ny_ + 2*halo_width_)
+  std::size_t nx_padded_;
+  std::size_t ny_padded_;
 
-  // Global physical size of domain
   double size_x_;
   double size_y_;
 
   bool reflective_;
 
-  // Data vectors will store local subgrid + halo regions
+  // Data vectors
   std::vector<double> h0_;
   std::vector<double> h1_;
   std::vector<double> hu0_;
@@ -90,20 +87,14 @@ private:
   std::vector<double> zdx_;
   std::vector<double> zdy_;
 
-  // Global starting indices for this process's owned subgrid
   std::size_t G_start_i_;
   std::size_t G_start_j_;
 
   // Output related members
   std::string filename_prefix_;
   std::unique_ptr<XDMFWriter> writer_ptr_;
+  std::size_t current_output_idx_;
 
-
-  /**
-   * @brief Accessor for 2D vector elements using PADDED indices.
-   * (padded_i, padded_j) are indices in the local array that includes halos.
-   * E.g., owned cell (0,0) is at (halo_width_, halo_width_) in padded array.
-   */
   inline double &at(std::vector<double> &vec, const std::size_t padded_i, const std::size_t padded_j) const
   {
     return vec[padded_j * nx_padded_ + padded_i];
@@ -114,10 +105,10 @@ private:
     return vec[padded_j * nx_padded_ + padded_i];
   }
 
-  void compute_kernel(const std::size_t padded_i, // Kernel will operate using padded indices
+  void compute_kernel(const std::size_t padded_i,
                       const std::size_t padded_j,
                       const double dt,
-                      const std::vector<double> &h0_local, // Pass local refs for clarity
+                      const std::vector<double> &h0_local,
                       const std::vector<double> &hu0_local,
                       const std::vector<double> &hv0_local,
                       std::vector<double> &h_local,
@@ -131,10 +122,12 @@ private:
                            const double Tend) const;
 
   void solve_step(const double dt,
-                  std::vector<double> &h0_local, // Pass local refs
+                  std::vector<double> &h0_local,
                   std::vector<double> &hu0_local,
                   std::vector<double> &hv0_local,
                   std::vector<double> &h_local,
                   std::vector<double> &hu_local,
                   std::vector<double> &hv_local);
+
+  void update_bcs(std::vector<double> &h_target, std::vector<double> &hu_target, std::vector<double> &hv_target);
 };

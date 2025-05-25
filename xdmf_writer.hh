@@ -44,6 +44,11 @@ public:
   // For this refactor, direct access is simpler.
   std::vector<double> time_steps_;
 
+
+  void create_vertices(std::vector<double>& vertices) const;
+  void create_cells(std::vector<int>& cells) const;
+  void write_mesh_hdf5() const;
+
 private:
   /**
    * @brief Write the root XDMF file that calls the HDF5 files for the
