@@ -99,95 +99,188 @@ XDMFWriter::write_root_xdmf() const
   }
 }
 
+
 void
-XDMFWriter::create_vertices(std::vector<double>& vertices) const
+XDMFWriter::create_vertices_parallel(int rank, int num_procs, std::vector<double>& local_block_vertices) const
 {
-  vertices.clear();
-  vertices.reserve((global_nx_ + 1) * (global_ny_ + 1) * 2);
-  const double dx = static_cast<double>(size_x_) / global_nx_;
-  const double dy = static_cast<double>(size_y_) / global_ny_;
-  for (std::size_t j = 0; j <= global_ny_; ++j)
+  const std::size_t n_global_vertices_total = (global_nx_ + 1) * (global_ny_ + 1);
+
+  const std::size_t base_n_local_v = n_global_vertices_total / num_procs;
+  const std::size_t remainder_n_local_v = n_global_vertices_total % num_procs;
+
+  const std::size_t num_vertices_this_rank_writes = base_n_local_v + (rank < remainder_n_local_v ? 1 : 0);
+  const std::size_t global_start_vertex_idx = rank * base_n_local_v + std::min(rank, (int)remainder_n_local_v);
+
+  local_block_vertices.clear();
+  if (num_vertices_this_rank_writes == 0) return;
+  local_block_vertices.reserve(num_vertices_this_rank_writes * 2);
+
+  const double dx = size_x_ / global_nx_;
+  const double dy = size_y_ / global_ny_;
+
+  for (std::size_t k = 0; k < num_vertices_this_rank_writes; ++k)
   {
-    for (std::size_t i = 0; i <= global_nx_; ++i)
-    {
-      vertices.push_back(i * dx);
-      vertices.push_back(j * dy);
-    }
+    const std::size_t current_global_vertex_idx = global_start_vertex_idx + k;
+    const std::size_t global_idx_i = current_global_vertex_idx % (global_nx_ + 1); // Vertex column index (0 to global_nx_)
+    const std::size_t global_idx_j = current_global_vertex_idx / (global_nx_ + 1); // Vertex row index (0 to global_ny_)
+
+    local_block_vertices.push_back(static_cast<double>(global_idx_i) * dx);
+    local_block_vertices.push_back(static_cast<double>(global_idx_j) * dy);
   }
 }
 
 void
-XDMFWriter::create_cells(std::vector<int>& cells) const
+XDMFWriter::create_cells_parallel(int rank, int num_procs, std::vector<int>& local_block_cells) const
 {
-  cells.clear();
-  cells.reserve(global_nx_ * global_ny_ * 4);
-  for (std::size_t j = 0; j < global_ny_; ++j)
+  const std::size_t n_global_cells_total = global_nx_ * global_ny_;
+
+  const std::size_t base_n_local_c = n_global_cells_total / num_procs;
+  const std::size_t remainder_n_local_c = n_global_cells_total % num_procs;
+
+  const std::size_t num_cells_this_rank_writes = base_n_local_c + (rank < remainder_n_local_c ? 1 : 0);
+  const std::size_t global_start_cell_idx = rank * base_n_local_c + std::min(rank, (int)remainder_n_local_c);
+  
+  local_block_cells.clear();
+  if (num_cells_this_rank_writes == 0) return;
+  local_block_cells.reserve(num_cells_this_rank_writes * 4);
+
+  for (std::size_t k = 0; k < num_cells_this_rank_writes; ++k)
   {
-    for (std::size_t i = 0; i < global_nx_; ++i)
-    {
-      cells.push_back(j * (global_nx_ + 1) + i);
-      cells.push_back(j * (global_nx_ + 1) + i + 1);
-      cells.push_back((j + 1) * (global_nx_ + 1) + i + 1);
-      cells.push_back((j + 1) * (global_nx_ + 1) + i);
-    }
+    const std::size_t current_global_cell_idx = global_start_cell_idx + k;
+    const std::size_t global_cell_i = current_global_cell_idx % global_nx_; // Cell column index (0 to global_nx_ - 1)
+    const std::size_t global_cell_j = current_global_cell_idx / global_nx_; // Cell row index (0 to global_ny_ - 1)
+
+    // Vertex indices for this cell (global_cell_i, global_cell_j)
+    // (bottom-left, bottom-right, top-right, top-left)
+    local_block_cells.push_back(global_cell_j * (global_nx_ + 1) + global_cell_i);
+    local_block_cells.push_back(global_cell_j * (global_nx_ + 1) + global_cell_i + 1);
+    local_block_cells.push_back((global_cell_j + 1) * (global_nx_ + 1) + global_cell_i + 1);
+    local_block_cells.push_back((global_cell_j + 1) * (global_nx_ + 1) + global_cell_i);
   }
 }
 
 void
-XDMFWriter::write_mesh_hdf5() const
+XDMFWriter::write_mesh_hdf5_parallel(MPI_Comm comm, int rank, int num_procs) const
 {
-  // Create the HDF5 file
-  hid_t file_id = H5Fcreate((filename_prefix_ + "_mesh.h5").c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
-  if (file_id < 0)
-  {
-    std::cerr << "Error creating HDF5 file: " << filename_prefix_ + "_mesh.h5" << std::endl;
+  std::string mesh_h5_filepath = filename_prefix_ + "/" + filename_prefix_ + "_mesh.h5";
+  if (rank == 0) {
+      printf("Attempting to write parallel mesh HDF5 file: %s\n", mesh_h5_filepath.c_str());
+      fflush(stdout);
+  }
+
+  hid_t fapl_id = H5Pcreate(H5P_FILE_ACCESS);
+  H5Pset_fapl_mpio(fapl_id, comm, MPI_INFO_NULL);
+
+  hid_t file_id = H5Fcreate(mesh_h5_filepath.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, fapl_id);
+  H5Pclose(fapl_id); // Close fapl_id after it's used by H5Fcreate
+
+  if (file_id < 0) {
+    std::cerr << "Rank " << rank << ": Error creating HDF5 mesh file: " << mesh_h5_filepath << std::endl;
     return;
   }
 
-  std::vector<double> vertices;
-  this->create_vertices(vertices);
+  // === Write Vertices ===
+  std::vector<double> local_vertices_data;
+  create_vertices_parallel(rank, num_procs, local_vertices_data);
 
-  std::vector<int> cells;
-  this->create_cells(cells);
+  const hsize_t n_global_vertices_total = (global_nx_ + 1) * (global_ny_ + 1);
+  hsize_t global_dims_v[2] = {n_global_vertices_total, 2};
+  
+  hsize_t num_vertices_this_rank_writes = local_vertices_data.size() / 2; // Each vertex has 2 components
+  hsize_t local_count_v[2] = {num_vertices_this_rank_writes, 2};
 
-  // Write vertices
-  hsize_t dims[2];
-  dims[0] = vertices.size() / 2;
-  dims[1] = 2;
-  hid_t dataspace_id = H5Screate_simple(2, dims, NULL);
-  hid_t dataset_id =
-    H5Dcreate2(file_id, "/vertices", H5T_IEEE_F64LE, dataspace_id, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-  if (dataset_id < 0)
-  {
-    std::cerr << "Error creating vertices dataset" << std::endl;
-    H5Sclose(dataspace_id);
+  const std::size_t base_n_local_v = n_global_vertices_total / num_procs;
+  const std::size_t remainder_n_local_v = n_global_vertices_total % num_procs;
+  const std::size_t global_start_vertex_idx_for_hdf5 = rank * base_n_local_v + std::min(rank, (int)remainder_n_local_v);
+  hsize_t offset_v[2] = {global_start_vertex_idx_for_hdf5, 0};
+  
+  hid_t filespace_v_id = H5Screate_simple(2, global_dims_v, NULL);
+  hid_t memspace_v_id = H5Screate_simple(2, local_count_v, NULL);
+  
+  hid_t dataset_v_id = H5Dcreate2(file_id, "/vertices", H5T_NATIVE_DOUBLE, filespace_v_id,
+                                  H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+  if (dataset_v_id < 0) {
+    std::cerr << "Rank " << rank << ": Error creating /vertices dataset" << std::endl;
+    H5Sclose(memspace_v_id);
+    H5Sclose(filespace_v_id);
     H5Fclose(file_id);
     return;
   }
 
-  H5Dwrite(dataset_id, H5T_IEEE_F64LE, H5S_ALL, H5S_ALL, H5P_DEFAULT, vertices.data());
-  H5Dclose(dataset_id);
-  H5Sclose(dataspace_id);
+  H5Sselect_hyperslab(filespace_v_id, H5S_SELECT_SET, offset_v, NULL, local_count_v, NULL);
 
-  // Write cells
-  dims[0] = cells.size() / 4;
-  dims[1] = 4;
-  dataspace_id = H5Screate_simple(2, dims, NULL);
-  dataset_id = H5Dcreate2(file_id, "/cells", H5T_STD_I32LE, dataspace_id, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-  if (dataset_id < 0)
-  {
-    std::cerr << "Error creating cells dataset" << std::endl;
-    H5Sclose(dataspace_id);
+  hid_t xfer_plist_v_id = H5Pcreate(H5P_DATASET_XFER);
+  H5Pset_dxpl_mpio(xfer_plist_v_id, H5FD_MPIO_COLLECTIVE);
+
+  if (num_vertices_this_rank_writes > 0) { // Important check for empty local data
+    herr_t status_v = H5Dwrite(dataset_v_id, H5T_NATIVE_DOUBLE, memspace_v_id, filespace_v_id,
+                               xfer_plist_v_id, local_vertices_data.data());
+    if (status_v < 0) {
+      std::cerr << "Rank " << rank << ": Error writing /vertices data" << std::endl;
+    }
+  } else {
+    // Rank has no vertices to write, still participate in collective call if necessary
+    // H5Dwrite with zero elements might still be needed by some HDF5 versions for true collective behavior
+    // Or, ensure that ranks with no data do not call H5Dcreate/H5Dwrite if that's problematic.
+    // For hyperslab, if count is 0, it should be fine.
+    // The current create_vertices_parallel ensures local_vertices_data is empty if count is 0.
+  }
+  
+  H5Pclose(xfer_plist_v_id);
+  H5Dclose(dataset_v_id);
+  H5Sclose(memspace_v_id);
+  H5Sclose(filespace_v_id);
+
+  // === Write Cells ===
+  std::vector<int> local_cells_data;
+  create_cells_parallel(rank, num_procs, local_cells_data);
+
+  const hsize_t n_global_cells_total = global_nx_ * global_ny_;
+  hsize_t global_dims_c[2] = {n_global_cells_total, 4};
+
+  hsize_t num_cells_this_rank_writes = local_cells_data.size() / 4; // Each cell has 4 components
+  hsize_t local_count_c[2] = {num_cells_this_rank_writes, 4};
+
+  const std::size_t base_n_local_c = n_global_cells_total / num_procs;
+  const std::size_t remainder_n_local_c = n_global_cells_total % num_procs;
+  const std::size_t global_start_cell_idx_for_hdf5 = rank * base_n_local_c + std::min(rank, (int)remainder_n_local_c);
+  hsize_t offset_c[2] = {global_start_cell_idx_for_hdf5, 0};
+
+  hid_t filespace_c_id = H5Screate_simple(2, global_dims_c, NULL);
+  hid_t memspace_c_id = H5Screate_simple(2, local_count_c, NULL);
+
+  hid_t dataset_c_id = H5Dcreate2(file_id, "/cells", H5T_NATIVE_INT, filespace_c_id,
+                                  H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+  if (dataset_c_id < 0) {
+    std::cerr << "Rank " << rank << ": Error creating /cells dataset" << std::endl;
+    H5Sclose(memspace_c_id);
+    H5Sclose(filespace_c_id);
     H5Fclose(file_id);
     return;
   }
+  
+  H5Sselect_hyperslab(filespace_c_id, H5S_SELECT_SET, offset_c, NULL, local_count_c, NULL);
 
-  H5Dwrite(dataset_id, H5T_STD_I32LE, H5S_ALL, H5S_ALL, H5P_DEFAULT, cells.data());
-  H5Dclose(dataset_id);
-  H5Sclose(dataspace_id);
+  hid_t xfer_plist_c_id = H5Pcreate(H5P_DATASET_XFER);
+  H5Pset_dxpl_mpio(xfer_plist_c_id, H5FD_MPIO_COLLECTIVE);
+
+  if (num_cells_this_rank_writes > 0) { // Important check for empty local data
+     herr_t status_c = H5Dwrite(dataset_c_id, H5T_NATIVE_INT, memspace_c_id, filespace_c_id,
+                                xfer_plist_c_id, local_cells_data.data());
+     if (status_c < 0) {
+       std::cerr << "Rank " << rank << ": Error writing /cells data" << std::endl;
+     }
+  }
+
+  H5Pclose(xfer_plist_c_id);
+  H5Dclose(dataset_c_id);
+  H5Sclose(memspace_c_id);
+  H5Sclose(filespace_c_id);
 
   // Close the file
   H5Fclose(file_id);
 
-  // std::cout << "Mesh HDF5 file created: " << filename + "_mesh.h5" << std::endl;
+  if (rank == 0) {
+    std::cout << "Parallel mesh HDF5 file created: " << mesh_h5_filepath << std::endl;
+  }
 }

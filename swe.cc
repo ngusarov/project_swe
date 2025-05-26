@@ -534,7 +534,7 @@ void SWESolver::solve(const double Tend, const bool full_log,
     printf("Rank %d: Before initial mesh/topography writes.\n", rank_); fflush(stdout);
     if (output_n_param > 0) {
 
-        // write_mesh_to_hdf5_parallel(); // Uncomment this line once implemented
+        writer_ptr_->write_mesh_hdf5_parallel(cart_comm_, rank_, num_procs_);
         printf("Rank %d: After mesh (implicit) setup, before topography write.\n", rank_); fflush(stdout);
         write_topography_to_hdf5_parallel(z_);
         printf("Rank %d: After topography write, before first barrier.\n", rank_); fflush(stdout);
@@ -590,7 +590,7 @@ void SWESolver::solve(const double Tend, const bool full_log,
 
         if (rank_ == 0 && writer_ptr_) {
             writer_ptr_->add_h_timestep(0.0);
-            writer_ptr_->write_mesh_hdf5();
+            // writer_ptr_->write_mesh_hdf5();
         }
         if (rank_ == 0) {
             current_output_idx_++;

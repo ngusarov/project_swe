@@ -66,13 +66,13 @@ main(int argc, char *argv[])
   // Option 1 - Solving simple problem: water drops in a box
   const int test_case_id = 1;  // Water drops in a box
   // const double Tend = 0.03;     // Simulation time in hours
-  const double Tend = 0.05;
+  const double Tend = 0.1;
   // const std::size_t global_nx = 1000; // Global number of cells
   // const std::size_t global_ny = 1000; // Global number of cells
   const std::size_t global_nx = 100; // Global number of cells
   const std::size_t global_ny = 100; // Global number of cells
   const std::size_t output_n = 10; // Every rank manages output
-  const std::string output_fname = "water_drops_mpi_small";
+  const std::string output_fname = "water_drops_mpi";
   const bool full_log = false;//(rank == 0); // Only rank 0 does full logging
 
   // Create SWESolver with MPI info

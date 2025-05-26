@@ -5,6 +5,9 @@
 #include <string>
 #include <cstddef> // For std::size_t
 
+#include <mpi.h> // Added for MPI
+#include <hdf5.h>  // Added for HDF5
+
 /**
  * @brief This class is used to write the XDMF file that references HDF5 files.
  * It is now designed to work with parallel HDF5 outputs where a single HDF5
@@ -38,24 +41,37 @@ public:
   void add_h_timestep(const double t);
 
   // Public access to time_steps_ for SWESolver to know the next HDF5 file index
-  // This is a pragmatic choice to avoid passing the index explicitly.
-  // A cleaner design might involve the XDMFWriter returning the index or
-  // SWESolver managing the index and passing it to add_h_timestep.
-  // For this refactor, direct access is simpler.
   std::vector<double> time_steps_;
 
+  /**
+   * @brief Creates the block of global vertices this rank is responsible for.
+   * @param rank The MPI rank of the current process.
+   * @param num_procs The total number of MPI processes.
+   * @param local_block_vertices Output vector to store (x,y) pairs for the local block of global vertices.
+   */
+  void create_vertices_parallel(int rank, int num_procs, std::vector<double>& local_block_vertices) const;
 
-  void create_vertices(std::vector<double>& vertices) const;
-  void create_cells(std::vector<int>& cells) const;
-  void write_mesh_hdf5() const;
+  /**
+   * @brief Creates the block of global cells this rank is responsible for.
+   * Vertex indices are global.
+   * @param rank The MPI rank of the current process.
+   * @param num_procs The total number of MPI processes.
+   * @param local_block_cells Output vector to store (v0,v1,v2,v3) indices for the local block of global cells.
+   */
+  void create_cells_parallel(int rank, int num_procs, std::vector<int>& local_block_cells) const;
+
+  /**
+   * @brief Writes the mesh (vertices and cells) to an HDF5 file in parallel.
+   * @param comm The MPI communicator.
+   * @param rank The MPI rank of the current process.
+   * @param num_procs The total number of MPI processes.
+   */
+  void write_mesh_hdf5_parallel(MPI_Comm comm, int rank, int num_procs) const;
 
 private:
   /**
    * @brief Write the root XDMF file that calls the HDF5 files for the
    * mesh and the solution at the time steps.
-   *
-   * This function may be called after each time step to update the XDMF file
-   * for including the last generated solution.
    */
   void write_root_xdmf() const;
 
@@ -70,4 +86,3 @@ private:
   /// @brief The total physical size of the domain in the y direction.
   const double size_y_;
 };
-
