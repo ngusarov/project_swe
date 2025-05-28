@@ -1,1 +1,1 @@
-Shallow water eq solver with MPI/CUDA
+Shallow water eq solver with MPI
