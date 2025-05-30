@@ -3,3 +3,5 @@
 water_drops*
 bench_output*
 output_overhead_*
+*.o
+swe
