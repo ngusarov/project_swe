@@ -6,7 +6,9 @@ CXX=${MPICXX} # Use MPICXX as the C++ compiler
 LD=${MPICXX}  # Use MPICXX as the linker
 
 # CXXFLAGS_COMMON = -g -O3 -Wall -Wextra -Werror -pedantic -std=c++11
-CXXFLAGS_COMMON = -g -O3 -std=c++11
+# CXXFLAGS_COMMON = -g -O3 -std=c++11
+CXXFLAGS_COMMON = -g -Wall -std=c++11
+
 # Consider if -fno-inline is still needed. For initial MPI debugging it can be useful,
 # but for performance later, you might want to remove it.
 CXXFLAGS_COMMON += -fno-inline
