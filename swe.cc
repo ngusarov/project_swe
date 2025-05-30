@@ -282,6 +282,115 @@ SWESolver::SWESolver(const int test_case_id,
   this->init_dx_dy();
 }
 
+
+void SWESolver::read_field_from_hdf5_parallel(const std::string& full_h5_filepath,
+                                              const std::string& dataset_name,
+                                              std::vector<double>& data_field_padded)
+{
+    printf("Rank %d: Entering read_field_from_hdf5_parallel for %s. nx_=%zu, ny_=%zu\n", rank_, dataset_name.c_str(), nx_, ny_); fflush(stdout);
+
+    hsize_t global_dims[2] = {global_ny_, global_nx_};
+    hsize_t local_dims[2] = {ny_, nx_}; // Local dimensions of the owned data block
+    hsize_t offset[2] = {G_start_j_, G_start_i_}; // Global starting index of this rank's block
+    hsize_t count[2] = {ny_, nx_}; // Size of the block this rank will read
+
+    printf("Rank %d: %s - Global: %zu x %zu, Local: %zu x %zu, Offset: %zu x %zu, Count: %zu x %zu\n",
+           rank_, dataset_name.c_str(), global_dims[0], global_dims[1], local_dims[0], local_dims[1],
+           offset[0], offset[1], count[0], count[1]);
+    fflush(stdout);
+
+    hid_t fapl_id = H5Pcreate(H5P_FILE_ACCESS);
+    if (fapl_id < 0) {
+        std::cerr << "Rank " << rank_ << ": Error creating file access property list." << std::endl;
+        return;
+    }
+    H5Pset_fapl_mpio(fapl_id, cart_comm_, MPI_INFO_NULL);
+
+    hid_t file_id = H5Fopen(full_h5_filepath.c_str(), H5F_ACC_RDONLY, fapl_id);
+    H5Pclose(fapl_id); // Close fapl_id after use
+    if (file_id < 0) {
+        std::cerr << "Rank " << rank_ << ": Error opening HDF5 file for reading: " << full_h5_filepath << std::endl;
+        return;
+    }
+
+    hid_t dataset_id = H5Dopen2(file_id, dataset_name.c_str(), H5P_DEFAULT);
+    if (dataset_id < 0) {
+        std::cerr << "Rank " << rank_ << ": Error opening dataset for reading: " << dataset_name << std::endl;
+        H5Fclose(file_id);
+        return;
+    }
+
+    hid_t filespace_id = H5Dget_space(dataset_id);
+    if (filespace_id < 0) {
+        std::cerr << "Rank " << rank_ << ": Error getting filespace for dataset: " << dataset_name << std::endl;
+        H5Dclose(dataset_id);
+        H5Fclose(file_id);
+        return;
+    }
+
+    // Select the hyperslab in the file representing this rank's portion
+    H5Sselect_hyperslab(filespace_id, H5S_SELECT_SET, offset, NULL, count, NULL);
+
+    hid_t memspace_id = H5Screate_simple(2, local_dims, NULL);
+    if (memspace_id < 0) {
+        std::cerr << "Rank " << rank_ << ": Error creating memory space for dataset: " << dataset_name << std::endl;
+        H5Sclose(filespace_id);
+        H5Dclose(dataset_id);
+        H5Fclose(file_id);
+        return;
+    }
+
+    hid_t xfer_plist_id = H5Pcreate(H5P_DATASET_XFER);
+    if (xfer_plist_id < 0) {
+        std::cerr << "Rank " << rank_ << ": Error creating transfer property list." << std::endl;
+        H5Sclose(memspace_id);
+        H5Sclose(filespace_id);
+        H5Dclose(dataset_id);
+        H5Fclose(file_id);
+        return;
+    }
+    H5Pset_dxpl_mpio(xfer_plist_id, H5FD_MPIO_COLLECTIVE);
+
+    // Create a temporary vector to hold the data read by this rank into its owned block
+    std::vector<double> local_owned_data(nx_ * ny_);
+    if (local_owned_data.empty() && (nx_ > 0 || ny_ > 0) ) {
+        // This case indicates nx_*ny_ is 0 even if dimensions are non-zero,
+        // which can happen if num_cells_this_rank_writes is 0 in create_cells_parallel.
+        // It's mostly for debugging.
+        printf("Rank %d: %s - local_owned_data is empty for reading. This rank likely owns no data.\n", rank_, dataset_name.c_str());
+        // No need to abort, just don't try to read.
+    } else {
+        herr_t status = H5Dread(dataset_id, H5T_NATIVE_DOUBLE, memspace_id, filespace_id, xfer_plist_id, local_owned_data.data());
+        if (status < 0) {
+            std::cerr << "Rank " << rank_ << ": Error reading data for dataset: " << dataset_name << std::endl;
+        }
+    }
+
+    // Now, copy the read data into the correct padded locations in data_field_padded
+    data_field_padded.assign(nx_padded_ * ny_padded_, 0.0); // Ensure padded vector is correctly sized and zeroed first
+
+    for (std::size_t j_local = 0; j_local < ny_; ++j_local) {
+        for (std::size_t i_local = 0; i_local < nx_; ++i_local) {
+            std::size_t padded_i = i_local + halo_width_;
+            std::size_t padded_j = j_local + halo_width_;
+            std::size_t local_owned_idx = j_local * nx_ + i_local;
+
+            if (local_owned_idx < local_owned_data.size()) { // Safety check
+                at(data_field_padded, padded_i, padded_j) = local_owned_data[local_owned_idx];
+            }
+        }
+    }
+
+    H5Pclose(xfer_plist_id);
+    H5Sclose(memspace_id);
+    H5Sclose(filespace_id);
+    H5Dclose(dataset_id);
+    H5Fclose(file_id);
+
+    printf("Rank %d: Exiting read_field_from_hdf5_parallel for %s\n", rank_, dataset_name.c_str()); fflush(stdout);
+}
+
+
 SWESolver::SWESolver(const std::string &h5_file_param, const double size_x_param, const double size_y_param,
                      MPI_Comm cart_comm_param, int rank_param, int num_procs_param,
                      const int* dims_param, const int* coords_param, const int* neighbors_param) :
@@ -292,22 +401,43 @@ SWESolver::SWESolver(const std::string &h5_file_param, const double size_x_param
   std::copy(coords_param, coords_param + 2, coords_);
   std::copy(neighbors_param, neighbors_param + 4, neighbors_);
 
-  std::vector<double> h0_global, hu0_global, hv0_global, z_global;
-  std::size_t file_global_nx = 0;
-  std::size_t file_global_ny = 0;
+  // First, rank 0 needs to read global dimensions from ONE of the HDF5 files
+  // (e.g., h0) and then broadcast them to all other ranks.
+  // This is crucial because all ranks need to know the global_nx_ and global_ny_
+  // before they can calculate their local sizes and offsets.
+  std::size_t file_global_nx_temp = 0;
+  std::size_t file_global_ny_temp = 0;
 
   if (rank_ == 0) {
-    // std::cout << "HDF5 Constructor: Rank 0 reading global data from " << h5_file_param << std::endl;
-    read_2d_array_from_DF5(h5_file_param, "h0", h0_global, file_global_nx, file_global_ny);
-    global_nx_ = file_global_nx;
-    global_ny_ = file_global_ny;
-    read_2d_array_from_DF5(h5_file_param, "hu0", hu0_global, file_global_nx, file_global_ny);
-    read_2d_array_from_DF5(h5_file_param, "hv0", hv0_global, file_global_nx, file_global_ny);
-    read_2d_array_from_DF5(h5_file_param, "topography", z_global, file_global_nx, file_global_ny);
+    // Temporarily open the file just to get global dimensions from a dataset
+    hid_t file_id = H5Fopen(h5_file_param.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+    if (file_id < 0) {
+      std::cerr << "Rank " << rank_ << ": Error opening HDF5 file to get dimensions: " << h5_file_param << std::endl;
+      // Handle error, maybe MPI_Abort
+    }
+    hid_t dataset_id = H5Dopen2(file_id, "h0", H5P_DEFAULT); // Assume 'h0' exists and has the global dims
+    if (dataset_id < 0) {
+      std::cerr << "Rank " << rank_ << ": Error opening 'h0' dataset to get dimensions from " << h5_file_param << std::endl;
+      H5Fclose(file_id);
+      // Handle error, maybe MPI_Abort
+    }
+    hid_t dataspace_id = H5Dget_space(dataset_id);
+    hsize_t dims[2];
+    H5Sget_simple_extent_dims(dataspace_id, dims, NULL);
+    file_global_nx_temp = dims[1]; // Assuming HDF5 stores as (NY, NX)
+    file_global_ny_temp = dims[0]; // So, dims[0] is NY, dims[1] is NX
+
+    H5Sclose(dataspace_id);
+    H5Dclose(dataset_id);
+    H5Fclose(file_id);
   }
 
-  MPI_Bcast(&global_nx_, 1, MPI_UNSIGNED_LONG_LONG, 0, cart_comm_);
-  MPI_Bcast(&global_ny_, 1, MPI_UNSIGNED_LONG_LONG, 0, cart_comm_);
+  // Broadcast global dimensions to all ranks
+  MPI_Bcast(&file_global_nx_temp, 1, MPI_UNSIGNED_LONG_LONG, 0, cart_comm_);
+  MPI_Bcast(&file_global_ny_temp, 1, MPI_UNSIGNED_LONG_LONG, 0, cart_comm_);
+
+  global_nx_ = file_global_nx_temp;
+  global_ny_ = file_global_ny_temp;
 
 
   std::size_t base_nx = global_nx_ / dims_[0];
@@ -329,12 +459,12 @@ SWESolver::SWESolver(const std::string &h5_file_param, const double size_x_param
   for (int py = 0; py < coords_[1]; ++py) {
     G_start_j_ += (global_ny_ / dims_[1]) + (py < remainder_ny ? 1 : 0);
   }
-  // printf("Rank %d (%d,%d) HDF5: local_owned %zu x %zu, local_padded %zu x %zu, G_start (%zu,%zu)\n",
-  //        rank_, coords_[0], coords_[1], nx_, ny_, nx_padded_, ny_padded_, G_start_i_, G_start_j_);
+  printf("Rank %d (%d,%d) HDF5: global %zu x %zu, local_owned %zu x %zu, local_padded %zu x %zu, G_start (%zu,%zu)\n",
+         rank_, coords_[0], coords_[1], global_nx_, global_ny_, nx_, ny_, nx_padded_, ny_padded_, G_start_i_, G_start_j_);
 
   fflush(stdout);
 
-
+  // Resize vectors with padded dimensions
   h0_.resize(nx_padded_ * ny_padded_, 0.0);
   h1_.resize(nx_padded_ * ny_padded_, 0.0);
   hu0_.resize(nx_padded_ * ny_padded_, 0.0);
@@ -345,72 +475,18 @@ SWESolver::SWESolver(const std::string &h5_file_param, const double size_x_param
   zdx_.resize(nx_padded_ * ny_padded_, 0.0);
   zdy_.resize(nx_padded_ * ny_padded_, 0.0);
 
-  // Distribute the data from rank 0 to all other ranks
-  // This is a simplified distribution. For large files, parallel HDF5 read
-  // (where each rank reads its portion) is more efficient.
-  // This approach gathers all data on rank 0 and then distributes it.
-  for (std::size_t j_local = 0; j_local < ny_; ++j_local) {
-      for (std::size_t i_local = 0; i_local < nx_; ++i_local) {
-          std::size_t g_i = G_start_i_ + i_local;
-          std::size_t g_j = G_start_j_ + j_local;
-          std::size_t padded_i = i_local + halo_width_;
-          std::size_t padded_j = j_local + halo_width_;
+  // Now, use the new parallel read function to load data directly into the padded vectors
+  read_field_from_hdf5_parallel(h5_file_param, "/h0", h0_);
+  read_field_from_hdf5_parallel(h5_file_param, "/hu0", hu0_);
+  read_field_from_hdf5_parallel(h5_file_param, "/hv0", hv0_);
+  read_field_from_hdf5_parallel(h5_file_param, "/topography", z_);
 
-          // Create a buffer for the data to be received by this rank
-          double h_val, hu_val, hv_val, z_val;
-          if (rank_ == 0) {
-              if (g_i < global_nx_ && g_j < global_ny_) {
-                  h_val = h0_global[g_j * global_nx_ + g_i];
-                  hu_val = hu0_global[g_j * global_nx_ + g_i];
-                  hv_val = hv0_global[g_j * global_nx_ + g_i];
-                  z_val = z_global[g_j * global_nx_ + g_i];
-              } else {
-                  h_val = 0.0; hu_val = 0.0; hv_val = 0.0; z_val = 0.0;
-              }
-          }
-          // MPI_Bcast for each element is inefficient.
-          // For actual parallel HDF5 or proper distribution, you'd use
-          // H5Dread with hyperslabs for each rank or MPI_Scatterv.
-          // For now, this is a placeholder to show data is being distributed.
-          // Given the read_2d_array_from_DF5 is only on rank 0, we'd need to send it.
-          // Re-implementing with proper parallel read in write_field_to_hdf5_parallel
-          // would be ideal for init also.
-          // For simplicity in this context, I'll rely on the warning about rank 0 read
-          // and assume the user will address true parallel data loading for large files.
-          // The current implementation here will effectively zero out data for non-rank 0
-          // if not loaded in a parallel manner.
-          // To correctly load in parallel, the `read_2d_array_from_DF5` would need to be
-          // a parallel read using MPI_IO, similar to `write_field_to_hdf5_parallel`.
-          // For now, I'll keep the `if (rank_ == 0)` block for populating the data
-          // and add an MPI_Barrier to ensure rank 0 finishes reading before others proceed,
-          // though true data distribution needs to happen.
-
-          // As stated in the previous response, the provided read_2d_array_from_DF5 is not parallel.
-          // To truly initialize h0_, hu0_, hv0_, z_ in parallel from a file, you would modify
-          // read_2d_array_from_DF5 to be a parallel HDF5 read, or perform a collective operation
-          // like MPI_Scatterv if rank 0 reads the whole file.
-          // The current warning in swe.cc is still relevant.
-          // I will proceed with the assumption that the provided HDF5 constructor's goal
-          // is to handle initialization from a file, even if the current implementation
-          // for non-rank 0 is a placeholder for actual data distribution.
-          // The data fields for non-rank 0 will remain 0.0 if not properly distributed.
-      }
-  }
-  
-  // Re-checking the original `HDF5 Constructor` logic in `swe.cc`
-  // It only populates `h0_`, `hu0_`, `hv0_`, `z_` on `rank_ == 0`.
-  // To make it truly work for all ranks, you'd need parallel HDF5 reading or
-  // collective communication to distribute `h0_global`, etc. to local `h0_`, etc.
-  // For the purpose of providing the requested code, I will keep the existing
-  // behavior of the HDF5 constructor and let the user handle the parallel data loading
-  // if their HDF5 files are large and truly need it.
-  // The `if (rank_ == 0)` block for populating local data based on global data
-  // read by rank 0 is already there. For other ranks, these vectors will remain zero.
-  // This is a known limitation that would require a more significant change to the
-  // HDF5 loading strategy within the `SWESolver` itself.
-
+  // Exchange halos for topography (z_) immediately after loading
   exchange_halos_for_field(z_);
-  this->init_dx_dy();
+  this->init_dx_dy(); // Recalculate zdx and zdy after z_ is finalized (including halos)
+
+  // Set reflective to false by default for HDF5 loaded cases
+  this->reflective_ = false;
 }
 
 void SWESolver::init_gaussian() {

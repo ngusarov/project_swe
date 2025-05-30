@@ -3,7 +3,7 @@
 #SBATCH --account=math-454
 #SBATCH --output=bench_output_overhead_%j.txt
 #SBATCH --cpus-per-task=1
-#SBATCH --time=01:00:00 # Increased time limit for larger runs
+#SBATCH --time=04:00:00 # Increased time limit for larger runs
 #SBATCH -n 32
 
 # This script benchmarks the overhead of writing solution files (HDF5/XDMF)
@@ -12,11 +12,13 @@
 # Ensure your executable is compiled and named 'swe'
 # Example: make swe
 
+module purge && module load gcc openmpi hdf5/1.12.2-mpi
+
 TEST_CASE=1 # Using test case 1 for this benchmark
 TEND=0.5    # Simulation time in hours (fixed for all runs)
 
 # Global grid sizes to test
-GLOBAL_SIZES=(1000) # Test with 100x100 and 1000x1000 global grids
+GLOBAL_SIZES=(200 600) # Test with 100x100 and 1000x1000 global grids
 
 # Number of processes to test
 PROCS=(1 2 4 8 16 32) # Varying number of processes

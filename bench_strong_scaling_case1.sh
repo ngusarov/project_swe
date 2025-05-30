@@ -3,14 +3,16 @@
 #SBATCH --account=math-454
 #SBATCH --output=bench_output_case1_%j.txt
 #SBATCH --cpus-per-task=1
-#SBATCH --time=01:00:00 # Increased time limit for larger runs
+#SBATCH --time=04:00:00 # Increased time limit for larger runs
 #SBATCH -n 72
 
 # Ensure your executable is compiled and named 'swe'
 # Example: make swe
 
+module purge && module load gcc openmpi hdf5/1.12.2-mpi
+
 GLOBAL_SIZES=(1000) # Global NX and NY 100 200 500 750 
-PROCS=(1 2 4 8 12 16 20 24 28 32 40 48 56 64 72) # Varying number of processes
+PROCS=(8 12 16 20 24 28 32 40 48 56 64 72) # Varying number of processes
 REPEAT=3  # Number of repetitions per config
 TEST_CASE=1 # Test Case ID for water drops in a box
 TEND=0.5 # Simulation time in hours

@@ -3,19 +3,21 @@
 #SBATCH --account=math-454
 #SBATCH --output=bench_output_case2_%j.txt
 #SBATCH --cpus-per-task=1
-#SBATCH --time=01:00:00 # Increased time limit for larger runs
+#SBATCH --time=05:00:00 # Increased time limit for larger runs
 #SBATCH -n 72
 
-GLOBAL_SIZES=(100 200 500 750 1000) # Global NX and NY
+module purge && module load gcc openmpi hdf5/1.12.2-mpi
+
+GLOBAL_SIZES=(750 1000) # Global NX and NY
 PROCS=(1 2 4 8 12 16 20 24 28 32 40 48 56 64 72) # Varying number of processes
 REPEAT=3
 TEST_CASE=2 # Test Case ID for analytical tsunami
-TEND=0.5 # Simulation time in hours
+TEND=0.05 # Simulation time in hours
 OUTPUT_N=0
 
 mkdir -p bench_results_case2
 
-echo "test_case,global_nx,global_ny,procs,run,total_time_seconds,num_iterations,time_per_iteration" > bench_results_case2/timings_case2.csv
+# echo "test_case,global_nx,global_ny,procs,run,total_time_seconds,num_iterations,time_per_iteration" > bench_results_case2/timings_case2.csv
 
 for SIZE in "${GLOBAL_SIZES[@]}"; do
   for NPROCS in "${PROCS[@]}"; do

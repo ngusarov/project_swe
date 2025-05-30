@@ -56,6 +56,9 @@ private:
                                     const std::vector<double>& data_field_padded);
   void write_topography_to_hdf5_parallel(const std::vector<double>& topography_padded);
 
+  void read_field_from_hdf5_parallel(const std::string& full_h5_filepath,
+                                    const std::string& dataset_name,
+                                    std::vector<double>& data_field_padded);
 
   // MPI-related members
   MPI_Comm cart_comm_;

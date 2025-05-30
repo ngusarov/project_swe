@@ -14,6 +14,9 @@
 
 # HDF5 file names and their corresponding global_nx/ny (actual grid size is NX by NY, so size+1)
 # You will need to make sure these files exist and are accessible.
+
+module purge && module load gcc openmpi hdf5/1.12.2-mpi
+
 declare -A HDF5_FILES
 HDF5_FILES["100"]="Data_nx101_500km.h5" # Global grid is 100x100
 HDF5_FILES["200"]="Data_nx201_500km.h5" # Global grid is 200x200
@@ -22,9 +25,9 @@ HDF5_FILES["1000"]="Data_nx1001_500km.h5"
 
 GLOBAL_SIZES=(100 200 500 750 1000) # Global NX and NY
 PROCS=(1 2 4 8 12 16 20 24 28 32 40 48 56 64 72) # Varying number of processes
-REPEAT=3
+REPEAT=1
 TEST_CASE=3 # Use test case 3 to trigger HDF5 constructor in main.cc
-TEND=0.2 # Simulation time in hours for HDF5 cases
+TEND=0.05 # Simulation time in hours for HDF5 cases
 OUTPUT_N=0
 
 mkdir -p bench_results_case3
