@@ -35,16 +35,13 @@ public:
             MPI_Comm cart_comm, int rank, int num_procs,
             const int* dims, const int* coords, const int* neighbors);
 
-  // Modified to return total_iterations
   std::size_t solve(const double Tend,
                     const bool full_log = false,
                     const std::size_t output_n_param = 0,
                     const std::string &fname_prefix = "test");
 
 private:
-  // ... (rest of the class definition remains the same)
-  void init_from_HDF5_file(const std::string &h5_file); // This method is declared but not defined/used
-                                                          // Its functionality is largely absorbed into the HDF5 constructor
+                                                        
   void init_gaussian();
   void init_dummy_tsunami();
   void init_dx_dy();

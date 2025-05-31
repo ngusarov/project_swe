@@ -218,12 +218,6 @@ XDMFWriter::write_mesh_hdf5_parallel(MPI_Comm comm, int rank, int num_procs) con
     if (status_v < 0) {
       std::cerr << "Rank " << rank << ": Error writing /vertices data" << std::endl;
     }
-  } else {
-    // Rank has no vertices to write, still participate in collective call if necessary
-    // H5Dwrite with zero elements might still be needed by some HDF5 versions for true collective behavior
-    // Or, ensure that ranks with no data do not call H5Dcreate/H5Dwrite if that's problematic.
-    // For hyperslab, if count is 0, it should be fine.
-    // The current create_vertices_parallel ensures local_vertices_data is empty if count is 0.
   }
   
   H5Pclose(xfer_plist_v_id);

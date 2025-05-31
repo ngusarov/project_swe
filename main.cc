@@ -69,7 +69,7 @@ main(int argc, char *argv[])
               output_fname_prefix = argv[++i];
           } else if (arg == "--full-log") {
               full_log = true;
-          } else if (arg == "--h5-file" && i + 1 < argc) { // New argument for HDF5 file
+          } else if (arg == "--h5-file" && i + 1 < argc) { // argument for HDF5 file
               h5_file_path = argv[++i];
           } else {
               if (rank == 0) {

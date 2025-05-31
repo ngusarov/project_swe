@@ -1,0 +1,147 @@
+<Servers>
+  <Server name="SCITAS Jed (w/ Password)" resource="csrc://jed.hpc.epfl.ch:11111">
+    <CommandStartup>
+      <Options>
+        <Option name="USER" label="User: " save="true">
+          <String default="YOUR_USERNAME" />
+        </Option>
+        <Option name="ACCOUNT" label="account: " save="true">
+          <String default="YOUR_ACCOUNT" />
+        </Option>
+        <Option name="PARTITION" label="partition: " save="true">
+          <Enumeration default="standard">
+            <Entry value="standard" label="standard" />
+            <Entry value="bigmem" label="bigmem" />
+          </Enumeration>
+        </Option>
+        <Option name="NODES" label="Nb nodes: " save="true">
+          <Range type="int" min="1" max="32" step="1" default="1" />
+        </Option>
+        <Option name="NTASKS" label="Tasks per node: " save="true">
+          <Range type="int" min="1" max="72" default="1" />
+        </Option>
+        <Option name="QOS" label="QoS: " save="true">
+          <Enumeration default="serial">
+            <Entry value="serial" label="serial" />
+            <Entry value="parallel" label="parallel" />
+            <Entry value="free" label="free" />
+            <Entry value="bigmem" label="bigmem" />
+          </Enumeration>
+        </Option>
+        <Option name="TIME_HH" label="Time hours: " save="true">
+          <Range type="int" min="0" max="72" step="1" default="0" />
+        </Option>
+        <Option name="TIME_MM" label="Time minutes: " save="true">
+          <Range type="int" min="0" max="30" step="10" default="30" />
+        </Option>
+        <Option name="MEM_PER_CPU" label="Mem per cpu: " save="true">
+          <String default="7000M" />
+        </Option>
+        <Option name="TERMINAL" label="Terminal: " save="true">
+          <String default="/usr/bin/xterm" />
+        </Option>
+        <Option name="SSH_EXEC" label="ssh executable: " save="true">
+          <String default="/usr/bin/ssh" />
+        </Option>
+        <Option name="FRONTAL_PORT" label="Frontal Port: " save="true">
+          <Range type="int" min="1025" max="65535" step="1" default="random" />
+        </Option>
+        <Option name="REMOTE_PORT" label="Remote Port: " save="true">
+          <Range type="int" min="1025" max="65535" step="1" default="random" />
+        </Option>
+      </Options>
+
+      <SSHCommand exec="salloc" delay="5">
+        <SSHConfig user="$USER$">
+          <Terminal exec="$TERMINAL$"/>
+          <SSH exec="$SSH_EXEC$"/>
+          <PortForwarding local="$REMOTE_PORT$"/>
+        </SSHConfig>
+        <Arguments>
+          <Argument value="--partition=$PARTITION$" />
+          <Argument value="--account=$ACCOUNT$" />
+          <Argument value="--ntasks-per-node=$NTASKS$" />
+          <Argument value="--qos=$QOS$" />
+          <Argument value="--nodes=$NODES$" />
+          <Argument value="--time=$TIME_HH$:$TIME_MM$:0" />
+          <Argument value="--mem-per-cpu=$MEM_PER_CPU$" />
+          <Argument value="/ssoft/spack/external/paraview/paraview-5.10.1.sub" />
+          <Argument value="$PV_SSH_PF_SERVER_PORT$" />
+          <Argument value="$jed.hpc.epfl.ch$" />
+          <Argument value="$FRONTAL_PORT$" />
+        </Arguments>
+      </SSHCommand>
+    </CommandStartup>
+  </Server>
+
+  <Server name="SCITAS Jed (w/ Key)" resource="csrc://jed.hpc.epfl.ch:11111">
+    <CommandStartup>
+      <Options>
+        <Option name="USER" label="User: " save="true">
+          <String default="YOUR_USERNAME" />
+        </Option>
+        <Option name="ACCOUNT" label="account: " save="true">
+          <String default="YOUR_ACCOUNT" />
+        </Option>
+        <Option name="PARTITION" label="partition: " save="true">
+          <Enumeration default="standard">
+            <Entry value="standard" label="standard" />
+            <Entry value="bigmem" label="bigmem" />
+          </Enumeration>
+        </Option>
+        <Option name="NODES" label="Nb nodes: " save="true">
+          <Range type="int" min="1" max="32" step="1" default="1" />
+        </Option>
+        <Option name="NTASKS" label="Tasks per node: " save="true">
+          <Range type="int" min="1" max="72" default="1" />
+        </Option>
+        <Option name="QOS" label="QoS: " save="true">
+          <Enumeration default="serial">
+            <Entry value="serial" label="serial" />
+            <Entry value="parallel" label="parallel" />
+            <Entry value="free" label="free" />
+            <Entry value="bigmem" label="bigmem" />
+          </Enumeration>
+        </Option>
+        <Option name="TIME_HH" label="Time hours: " save="true">
+          <Range type="int" min="0" max="72" step="1" default="0" />
+        </Option>
+        <Option name="TIME_MM" label="Time minutes: " save="true">
+          <Range type="int" min="0" max="30" step="10" default="30" />
+        </Option>
+        <Option name="MEM_PER_CPU" label="Mem per cpu: " save="true">
+          <String default="7000M" />
+        </Option>
+        <Option name="SSH_EXEC" label="ssh executable: " save="true">
+          <String default="/usr/bin/ssh" />
+        </Option>
+        <Option name="FRONTAL_PORT" label="Frontal Port: " save="true">
+          <Range type="int" min="1025" max="65535" step="1" default="random" />
+        </Option>
+        <Option name="REMOTE_PORT" label="Remote Port: " save="true">
+          <Range type="int" min="1025" max="65535" step="1" default="random" />
+        </Option>
+      </Options>
+
+      <SSHCommand exec="salloc" delay="5">
+        <SSHConfig user="$USER$">
+          <SSH exec="$SSH_EXEC$"/>
+          <PortForwarding local="$REMOTE_PORT$"/>
+        </SSHConfig>
+        <Arguments>
+          <Argument value="--partition=$PARTITION$" />
+          <Argument value="--account=$ACCOUNT$" />
+          <Argument value="--ntasks-per-node=$NTASKS$" />
+          <Argument value="--qos=$QOS$" />
+          <Argument value="--nodes=$NODES$" />
+          <Argument value="--time=$TIME_HH$:$TIME_MM$:0" />
+          <Argument value="--mem-per-cpu=$MEM_PER_CPU$" />
+          <Argument value="/ssoft/spack/external/paraview/paraview-5.10.1.sub" />
+          <Argument value="$PV_SSH_PF_SERVER_PORT$" />
+          <Argument value="$jed.hpc.epfl.ch$" />
+          <Argument value="$FRONTAL_PORT$" />
+        </Arguments>
+      </SSHCommand>
+    </CommandStartup>
+  </Server>
+</Servers>
